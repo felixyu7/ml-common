@@ -81,7 +81,7 @@ loss = gaussian_nll_loss(mu, var, target)
 ### Datasets
 
 ```python
-from ml_common.data import MmapDataset, create_dataloaders
+from ml_common.dataloaders import MmapDataset, create_dataloaders
 
 # Memory-mapped datasets
 dataset = MmapDataset(
