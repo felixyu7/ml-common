@@ -129,17 +129,3 @@ cfg = {
     'project_save_dir': './experiments'
 }
 ```
-
-## Features
-
-- Mixed precision training (fp16/bf16/fp32)
-- Automatic checkpointing and logging
-- W&B or CSV logging
-- Gradient clipping and scaling
-- Cosine annealing scheduler
-- Memory-mapped datasets for large data
-- Custom loss/metric/preprocessing callbacks
-
-## License
-
-MIT
