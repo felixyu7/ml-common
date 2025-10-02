@@ -179,18 +179,24 @@ class Trainer:
 
         self.model.train()
         running_loss = 0.0
-        num_batches = len(train_loader)
+        try:
+            num_batches = len(train_loader)
+        except TypeError:
+            num_batches = None
+        batches_seen = 0
 
         pbar = tqdm(
             train_loader,
             desc=f'Epoch {self.current_epoch+1}/{self.epochs}',
             leave=False,
-            dynamic_ncols=True
+            dynamic_ncols=True,
+            total=num_batches
         )
 
         for batch_idx, (coords, features, labels) in enumerate(pbar):
             coords, features, labels = coords.to(self.device), features.to(self.device), labels.to(self.device)
             coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
+            batches_seen += 1
 
             self.optimizer.zero_grad()
 
@@ -220,13 +226,15 @@ class Trainer:
                 'Avg': f'{running_loss/(batch_idx+1):.6f}'
             })
 
-            if batch_idx % 50 == 0:
+            if num_batches is not None and batch_idx % 50 == 0:
+                step = self.current_epoch * num_batches + batch_idx
                 self.log_metrics({
                     'train_loss': loss.item(),
                     'learning_rate': self.scheduler.get_last_lr()[0]
-                }, step=self.current_epoch * num_batches + batch_idx)
+                }, step=step)
 
-        return {'train_loss': running_loss / num_batches}
+        avg_loss = running_loss / max(1, batches_seen)
+        return {'train_loss': avg_loss}
 
     def _print_profiling_results(self, forward_times: list, total_time: float):
         """Print profiling statistics."""
@@ -259,8 +267,13 @@ class Trainer:
 
         start_time = time.time()
 
+        try:
+            val_total = len(val_loader)
+        except TypeError:
+            val_total = None
+
         with torch.no_grad():
-            val_pbar = tqdm(val_loader, desc='Validation', leave=False, dynamic_ncols=True)
+            val_pbar = tqdm(val_loader, desc='Validation', leave=False, dynamic_ncols=True, total=val_total)
             for coords, features, labels in val_pbar:
                 coords, features, labels = coords.to(self.device), features.to(self.device), labels.to(self.device)
                 coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
@@ -283,18 +296,26 @@ class Trainer:
         if profile:
             self._print_profiling_results(forward_times, time.time() - start_time)
 
-        all_preds = torch.cat(all_preds, dim=0)
-        all_labels = torch.cat(all_labels, dim=0)
+        batch_count = len(all_preds)
+        avg_val_loss = total_loss / max(1, batch_count)
+
+        metrics = {'val_loss': avg_val_loss}
+
+        if batch_count == 0:
+            if save_predictions:
+                print('Warning: No validation batches processed; skipping prediction export.')
+            return metrics
+
+        preds_tensor = torch.cat(all_preds, dim=0)
+        labels_tensor = torch.cat(all_labels, dim=0)
 
         if save_predictions:
             predictions_file = self.save_dir / 'results.npz'
-            np.savez(predictions_file, predictions=all_preds.float().numpy(), labels=all_labels.float().numpy())
+            np.savez(predictions_file, predictions=preds_tensor.float().numpy(), labels=labels_tensor.float().numpy())
             print(f"Saved predictions to: {predictions_file}")
 
-        metrics = {'val_loss': total_loss / len(val_loader)}
-
         if self.metric_fn is not None:
-            task_metrics = self.metric_fn(all_preds, all_labels)
+            task_metrics = self.metric_fn(preds_tensor, labels_tensor)
             metrics.update({f'val_{k}': v for k, v in task_metrics.items()})
 
         return metrics
