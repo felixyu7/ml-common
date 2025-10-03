@@ -188,9 +188,10 @@ class Trainer:
         pbar = tqdm(
             train_loader,
             desc=f'Epoch {self.current_epoch+1}/{self.epochs}',
-            leave=False,
+            leave=True,
             dynamic_ncols=True,
-            total=num_batches
+            total=num_batches,
+            position=1,
         )
 
         for batch_idx, (coords, features, labels) in enumerate(pbar):
@@ -273,7 +274,14 @@ class Trainer:
             val_total = None
 
         with torch.no_grad():
-            val_pbar = tqdm(val_loader, desc='Validation', leave=False, dynamic_ncols=True, total=val_total)
+            val_pbar = tqdm(
+                val_loader,
+                desc='Validation',
+                leave=True,
+                dynamic_ncols=True,
+                total=val_total,
+                position=2,
+            )
             for coords, features, labels in val_pbar:
                 coords, features, labels = coords.to(self.device), features.to(self.device), labels.to(self.device)
                 coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from icecube import dataio, dataclasses
+from icecube import dataio, dataclasses, icetray
 
 
 def _expand_paths(paths: Sequence[str]) -> List[str]:
@@ -118,58 +118,62 @@ class I3IterableDataset(IterableDataset):
 
     def _physics_events(self, path: str) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         i3_file = dataio.I3File(path)
-        while i3_file.more():
-            frame = i3_file.pop_physics()
-            if frame is None:
-                continue
-
-            if self.sub_event_stream is not None:
-                if not frame.Has('I3EventHeader'):
+        try:
+            while i3_file.more():
+                frame = i3_file.pop_frame()
+                if frame is None:
                     continue
-                header = frame['I3EventHeader']
-                if header.sub_event_stream != self.sub_event_stream:
+                if frame.Stop != icetray.I3Frame.Physics:
                     continue
-            if self.required_filters and not self._passes_filters(frame):
-                continue
 
-            pulse_map = dataclasses.I3RecoPulseSeriesMap.from_frame(frame, self.pulse_key)
-            if len(pulse_map) == 0:
-                continue
+                if self.sub_event_stream is not None:
+                    if not frame.Has('I3EventHeader'):
+                        continue
+                    header = frame['I3EventHeader']
+                    if header.sub_event_stream != self.sub_event_stream:
+                        continue
+                if self.required_filters and not self._passes_filters(frame):
+                    continue
 
-            positions: List[np.ndarray] = []
-            times: List[float] = []
-            charges: List[float] = []
+                pulse_map = dataclasses.I3RecoPulseSeriesMap.from_frame(frame, self.pulse_key)
+                if len(pulse_map) == 0:
+                    continue
 
-            for omkey, series in pulse_map.items():
-                dom_position = self.om_positions[omkey]
-                for pulse in series:
-                    positions.append(dom_position)
-                    times.append(pulse.time)
-                    charges.append(pulse.charge)
+                positions: List[np.ndarray] = []
+                times: List[float] = []
+                charges: List[float] = []
 
-            if not positions:
-                continue
+                for omkey, series in pulse_map.items():
+                    dom_position = self.om_positions[omkey]
+                    for pulse in series:
+                        positions.append(dom_position)
+                        times.append(pulse.time)
+                        charges.append(pulse.charge)
 
-            pos = np.asarray(positions, dtype=np.float32)
-            t = np.asarray(times, dtype=np.float32)
-            q = np.asarray(charges, dtype=np.float32)
+                if not positions:
+                    continue
 
-            coords = np.concatenate([pos, t[:, None]], axis=1).astype(np.float32)
-            features = np.stack([t, np.log1p(q)], axis=1).astype(np.float32)
+                pos = np.asarray(positions, dtype=np.float32)
+                t = np.asarray(times, dtype=np.float32)
+                q = np.asarray(charges, dtype=np.float32)
 
-            coords = coords / 1000.0 # Convert to km / microseconds
-            features[:,0] = features[:,0] / 1000.0 # Convert to microseconds
+                coords = np.concatenate([pos, t[:, None]], axis=1).astype(np.float32)
+                features = np.stack([t, np.log1p(q)], axis=1).astype(np.float32)
 
-            primary = frame[self.primary_key]
-            energy = primary.energy
-            log_e = np.float32(np.log10(energy))
-            dir_x = np.sin(primary.dir.zenith) * np.cos(primary.dir.azimuth)
-            dir_y = np.sin(primary.dir.zenith) * np.sin(primary.dir.azimuth)
-            dir_z = np.cos(primary.dir.zenith)
-            labels = np.array([log_e, dir_x, dir_y, dir_z], dtype=np.float32)
+                coords = coords / 1000.0 # Convert to km / microseconds
+                features[:,0] = features[:,0] / 1000.0 # Convert to microseconds
 
-            yield coords, features, labels
-        i3_file.close()
+                primary = frame[self.primary_key]
+                energy = primary.energy
+                log_e = np.float32(np.log10(energy))
+                dir_x = np.sin(primary.dir.zenith) * np.cos(primary.dir.azimuth)
+                dir_y = np.sin(primary.dir.zenith) * np.sin(primary.dir.azimuth)
+                dir_z = np.cos(primary.dir.zenith)
+                labels = np.array([log_e, dir_x, dir_y, dir_z], dtype=np.float32)
+
+                yield coords, features, labels
+        finally:
+            i3_file.close()
 
     def _round_robin(self, iterators: List[Iterator]) -> Iterator:
         active = list(iterators)
