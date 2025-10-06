@@ -9,7 +9,12 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from icecube import dataio, dataclasses, icetray
+try:
+    from icecube import dataio, dataclasses, icetray  # type: ignore
+    ICECUBE_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    dataio = dataclasses = icetray = None  # type: ignore
+    ICECUBE_AVAILABLE = False
 
 
 def _expand_paths(paths: Sequence[str]) -> List[str]:
@@ -40,6 +45,9 @@ class I3IterableDataset(IterableDataset):
         random_seed: Optional[int] = None,
     ) -> None:
         super().__init__()
+
+        if not ICECUBE_AVAILABLE:
+            raise ImportError('I3IterableDataset requires the IceCube python modules.')
 
         self.file_paths = _expand_paths(files)
         if not self.file_paths:

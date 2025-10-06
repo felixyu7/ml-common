@@ -5,7 +5,7 @@ from typing import Dict, Any, Tuple
 
 from .mmap import MmapDataset
 from .kaggle import KaggleDataset, load_sensor_geometry, get_icecube_file_names
-from .i3 import I3IterableDataset
+from .i3 import I3IterableDataset, ICECUBE_AVAILABLE
 from ..utils.collators import IrregularDataCollator
 from ..utils.samplers import RandomChunkSampler
 
@@ -60,6 +60,9 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     dataloader_type = cfg['dataloader']
 
     if dataloader_type == 'i3':
+        if not ICECUBE_AVAILABLE:
+            raise ImportError('I3 dataloader requires the IceCube python modules.')
+
         required_filters = data_options.get('filter_names', [])
         mix_n_files = data_options.get('mix_n_files', 4)
         seed = data_options.get('seed')
