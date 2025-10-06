@@ -65,6 +65,7 @@ class Trainer:
 
         # Training state
         self.current_epoch = 0
+        self.current_step = 0
         self.best_val_loss = float('inf')
 
     @staticmethod
@@ -227,12 +228,12 @@ class Trainer:
                 'Avg': f'{running_loss/(batch_idx+1):.6f}'
             })
 
-            if num_batches is not None and batch_idx % 50 == 0:
-                step = self.current_epoch * num_batches + batch_idx
+            if self.current_step % 50 == 0:
                 self.log_metrics({
                     'train_loss': loss.item(),
                     'learning_rate': self.scheduler.get_last_lr()[0]
-                }, step=step)
+                }, step=self.current_step)
+            self.current_step += 1
 
         avg_loss = running_loss / max(1, batches_seen)
         return {'train_loss': avg_loss}
@@ -295,7 +296,7 @@ class Trainer:
                             torch.cuda.synchronize()
                         forward_times.append(time.time() - t0)
 
-                loss = self.loss_fn(preds, labels)
+                    loss = self.loss_fn(preds, labels)
                 total_loss += loss.item()
                 all_preds.append(preds.cpu())
                 all_labels.append(labels.cpu())

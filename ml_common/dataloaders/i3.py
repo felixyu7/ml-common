@@ -41,9 +41,6 @@ class I3IterableDataset(IterableDataset):
     ) -> None:
         super().__init__()
 
-        if not files:
-            raise ValueError('No I3 files provided.')
-
         self.file_paths = _expand_paths(files)
         if not self.file_paths:
             raise ValueError('Resolved I3 file list is empty.')
@@ -82,21 +79,27 @@ class I3IterableDataset(IterableDataset):
         return positions
 
     def _per_worker_files(self) -> List[str]:
+        files = list(self.file_paths)
+
+        # global shuffle with a seed shared across workers
+        if self.shuffle_files:
+            seed = 0 if self.random_seed is None else self.random_seed
+            rng = random.Random(seed)
+            rng.shuffle(files)
+
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is None:
-            return list(self.file_paths)
+            return files
+        return files[worker_info.id :: worker_info.num_workers]
 
-        return list(self.file_paths[worker_info.id :: worker_info.num_workers])
 
     def _prepare_file_order(self, files: List[str]) -> List[str]:
         if not self.shuffle_files:
             return files
-
         rng = random.Random(self.random_seed)
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None and self.random_seed is not None:
             rng.seed(self.random_seed + worker_info.id)
-
         files = list(files)
         rng.shuffle(files)
         return files
@@ -104,15 +107,12 @@ class I3IterableDataset(IterableDataset):
     def _passes_filters(self, frame) -> bool:
         if not self.required_filters:
             return True
-
         if not frame.Has(self.filter_key):
             return False
-
         mask = frame[self.filter_key]
-        for name in self.required_filters:
+        for name in self.required_filters:  # any-pass semantics
             if name in mask:
-                entry = mask[name]
-                if entry.condition_passed:
+                if mask[name].condition_passed:
                     return True
         return False
 
@@ -121,9 +121,7 @@ class I3IterableDataset(IterableDataset):
         try:
             while i3_file.more():
                 frame = i3_file.pop_frame()
-                if frame is None:
-                    continue
-                if frame.Stop != icetray.I3Frame.Physics:
+                if frame is None or frame.Stop != icetray.I3Frame.Physics:
                     continue
 
                 if self.sub_event_stream is not None:
@@ -142,14 +140,12 @@ class I3IterableDataset(IterableDataset):
                 positions: List[np.ndarray] = []
                 times: List[float] = []
                 charges: List[float] = []
-
                 for omkey, series in pulse_map.items():
                     dom_position = self.om_positions[omkey]
                     for pulse in series:
                         positions.append(dom_position)
                         times.append(pulse.time)
                         charges.append(pulse.charge)
-
                 if not positions:
                     continue
 
@@ -157,11 +153,11 @@ class I3IterableDataset(IterableDataset):
                 t = np.asarray(times, dtype=np.float32)
                 q = np.asarray(charges, dtype=np.float32)
 
-                coords = np.concatenate([pos, t[:, None]], axis=1).astype(np.float32)
-                features = np.stack([t, np.log1p(q)], axis=1).astype(np.float32)
+                coords = np.concatenate([pos, t[:, None]], axis=1)  # (N,4)
+                features = np.stack([t, np.log1p(q)], axis=1)        # (N,2)
 
-                coords = coords / 1000.0 # Convert to km / microseconds
-                features[:,0] = features[:,0] / 1000.0 # Convert to microseconds
+                coords *= 1e-3            # meters/ns -> km/µs
+                features[:, 0] *= 1e-3    # ns -> µs
 
                 primary = frame[self.primary_key]
                 energy = primary.energy
@@ -171,37 +167,40 @@ class I3IterableDataset(IterableDataset):
                 dir_z = np.cos(primary.dir.zenith)
                 labels = np.array([log_e, dir_x, dir_y, dir_z], dtype=np.float32)
 
-                yield coords, features, labels
+                yield coords.astype(np.float32, copy=False), features.astype(np.float32, copy=False), labels
         finally:
             i3_file.close()
-
-    def _round_robin(self, iterators: List[Iterator]) -> Iterator:
-        active = list(iterators)
-        while active:
-            next_active = []
-            for iterator in active:
-                try:
-                    yield next(iterator)
-                    next_active.append(iterator)
-                except StopIteration:
-                    continue
-            active = next_active
 
     def __iter__(self) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         files = self._per_worker_files()
         if not files:
             return
-
         files = self._prepare_file_order(files)
 
-        batch: List[Iterator] = []
-        for path in files:
-            batch.append(self._physics_events(path))
-            if len(batch) == self.mix_n_files:
-                for sample in self._round_robin(batch):
-                    yield sample
-                batch = []
+        # Per-worker RNG for stochastic interleaving
+        rng = random.Random(self.random_seed)
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None and self.random_seed is not None:
+            rng.seed(self.random_seed + worker_info.id)
 
-        if batch:
-            for sample in self._round_robin(batch):
+        # Keep up to mix_n_files open at once; interleave randomly among active,
+        # replacing an exhausted iterator with the next file.
+        pending = list(files)
+        active: List[Iterator] = []
+        for _ in range(min(self.mix_n_files, len(pending))):
+            active.append(self._physics_events(pending.pop()))
+
+        rr_idx = 0  # deterministic round-robin index when shuffle_files=False
+        while active:
+            idx = rng.randrange(len(active)) if self.shuffle_files else (rr_idx % len(active))
+            it = active[idx]
+            sample = next(it, None)  # avoid try/except for StopIteration
+            if sample is None:
+                if pending:
+                    active[idx] = self._physics_events(pending.pop())
+                else:
+                    active.pop(idx)
+            else:
+                if not self.shuffle_files:
+                    rr_idx += 1
                 yield sample

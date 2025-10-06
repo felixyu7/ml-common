@@ -86,7 +86,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
             required_filters=required_filters,
             sub_event_stream=data_options.get('sub_event_stream', 'InIceSplit'),
             mix_n_files=max(1, mix_n_files),
-            shuffle_files=False,
+            shuffle_files=data_options.get('shuffle_files', True),
             random_seed=seed,
         )
 
