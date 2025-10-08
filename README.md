@@ -70,13 +70,23 @@ trainer.test(test_loader)
 from ml_common.losses import (
     angular_distance_loss,
     von_mises_fisher_loss,
-    gaussian_nll_loss
+    gaussian_nll_loss,
+    spherical_harmonic_loss,
 )
 
 loss = angular_distance_loss(pred_dirs, true_dirs)
 loss = von_mises_fisher_loss(pred_dirs, true_dirs)
 loss = gaussian_nll_loss(mu, var, target)
+# Optional: requires `spherical-harmonics-loss`
+from spherical_harmonics_loss import get_n_coeffs
+
+l_max = 4
+coeffs = torch.randn(batch_size, get_n_coeffs(l_max))
+directions = torch.randn(batch_size, 3)
+loss = spherical_harmonic_loss(coeffs, directions, l_max=l_max)
 ```
+
+Install `spherical-harmonics-loss` alongside `ml-common` to enable the helper.
 
 ### Datasets
 
