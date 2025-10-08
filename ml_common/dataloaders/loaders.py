@@ -165,6 +165,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         train_len = len(train_dataset)
         if train_len == 0:
             train_sampler = None
+            val_sampler = RandomChunkSampler(valid_dataset, valid_dataset.chunks) if dataloader_type == 'kaggle' else RandomSampler(valid_dataset)
             print("Warning: Training split is empty")
         elif dataloader_type == 'kaggle':
             train_sampler = RandomChunkSampler(train_dataset, train_dataset.chunks)
