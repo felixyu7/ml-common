@@ -168,10 +168,10 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
             print("Warning: Training split is empty")
         elif dataloader_type == 'kaggle':
             train_sampler = RandomChunkSampler(train_dataset, train_dataset.chunks)
+            val_sampler = RandomChunkSampler(valid_dataset, valid_dataset.chunks)
         else:
             train_sampler = RandomSampler(train_dataset)
-
-        val_sampler = None  # Sequential for validation
+            val_sampler = RandomSampler(valid_dataset)
 
     # Get batch size and num_workers
     batch_size = data_options.get('batch_size') or cfg['training_options']['batch_size']
