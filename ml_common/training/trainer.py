@@ -246,10 +246,13 @@ class Trainer:
         print("\n--- Inference Profiling ---")
         print(f"Total runtime (incl. I/O): {total_time:.4f}s")
         print(f"Total forward time: {total_forward:.4f}s")
-        print(f"Avg forward time per batch: {avg_forward * 1000:.4f}ms")
         if self.device.type == 'cuda':
+            print(f"Avg forward time per batch: {avg_forward * 1000:.4f}ms")
             peak_mem_gb = torch.cuda.max_memory_allocated(self.device) / (1024**3)
             print(f"Peak CUDA memory: {peak_mem_gb:.4f}GB")
+        else:
+            std_forward = np.std(forward_times) if forward_times else 0
+            print(f"Avg forward time per batch: {avg_forward * 1000:.4f}ms, std: {std_forward * 1000:.4f}ms")
         print("---------------------------\n")
 
     def validate(
