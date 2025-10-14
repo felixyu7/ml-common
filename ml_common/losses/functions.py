@@ -1,5 +1,6 @@
 """Loss functions for angular/directional reconstruction and energy regression."""
 
+import math
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -13,6 +14,20 @@ except ImportError:  # Package is optional
     get_n_coeffs = None  # type: ignore[assignment]
 
 _SH_LOSS_CACHE: Dict[Tuple[int, int, int, str, str, torch.dtype], torch.nn.Module] = {}
+
+
+def cosine_mix_weights(progress: float, min_vmf_weight: float) -> Tuple[float, float]:
+    """Return cosine-annealed weights for VMF and angular components."""
+    clamped_progress = max(0.0, min(1.0, float(progress)))
+    min_vmf = float(min_vmf_weight)
+    if not 0.0 <= min_vmf <= 1.0:
+        raise ValueError(f"min_vmf_weight must be in [0, 1], got {min_vmf_weight}")
+
+    span = 1.0 - min_vmf
+    vmf_weight = min_vmf + span * 0.5 * (1.0 + math.cos(math.pi * clamped_progress))
+    vmf_weight = max(0.0, min(1.0, vmf_weight))
+    angular_weight = 1.0 - vmf_weight
+    return vmf_weight, angular_weight
 
 
 def angular_distance_loss(
@@ -114,3 +129,38 @@ def spherical_harmonic_loss(
 
     loss_module = loss_module.to(coeffs.device)
     return loss_module(coeffs, target_dirs)
+
+
+class CombinedDirectionalLoss:
+    """Cosine-annealed mixture of VMF and angular distance losses."""
+
+    def __init__(
+        self,
+        *,
+        min_vmf_weight: float = 0.1,
+        vmf_scale: float = 1.0,
+        angular_scale: float = 1.0
+    ):
+        if not 0.0 <= min_vmf_weight <= 1.0:
+            raise ValueError(f"min_vmf_weight must be in [0, 1], got {min_vmf_weight}")
+        self.min_vmf_weight = float(min_vmf_weight)
+        self.vmf_scale = float(vmf_scale)
+        self.angular_scale = float(angular_scale)
+        self._progress = 0.0
+
+    def set_epoch_progress(self, progress: float) -> None:
+        """Update training progress in [0, 1] for the cosine schedule."""
+        self._progress = max(0.0, min(1.0, float(progress)))
+
+    def current_weights(self) -> Tuple[float, float]:
+        """Return current (vmf_weight, angular_weight) tuple."""
+        return cosine_mix_weights(self._progress, self.min_vmf_weight)
+
+    def __call__(self, pred: Tensor, truth: Tensor) -> Tensor:
+        vmf_weight, angular_weight = self.current_weights()
+        vmf_loss = von_mises_fisher_loss(pred, truth)
+        angular_loss = angular_distance_loss(pred, truth, reduction="mean")
+        return (
+            self.vmf_scale * vmf_weight * vmf_loss
+            + self.angular_scale * angular_weight * angular_loss
+        )

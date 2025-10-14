@@ -5,6 +5,7 @@ from .functions import (
     gaussian_nll_loss,
     von_mises_fisher_loss,
     spherical_harmonic_loss,
+    CombinedDirectionalLoss,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     'gaussian_nll_loss',
     'von_mises_fisher_loss',
     'spherical_harmonic_loss',
+    'CombinedDirectionalLoss',
 ]
