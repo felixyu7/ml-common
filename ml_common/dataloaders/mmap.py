@@ -132,7 +132,7 @@ class MmapDataset(torch.utils.data.Dataset):
             if self.dataset_type == 'prometheus' and 'id_idx' in photons.dtype.names:
                 photons_dict['id_idx'] = photons['id_idx']
 
-            sensor_positions, sensor_stats = nt_summary_stats.process_prometheus_event(photons_dict)
+            sensor_positions, sensor_stats = nt_summary_stats.process_event(photons_dict)
 
             # 4D coords: x, y, z, first_hit_time
             pos = np.column_stack([
