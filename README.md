@@ -80,7 +80,7 @@ loss = gaussian_nll_loss(mu, var, target)
 
 ### Datasets
 
-The memory-mapped dataloader is meant to be used in conjunction with [nt-mmap-converter](https://github.com/felixyu7/nt-mmap-converter), which contains scripts to convert standard neutrino telescope data formats such as .i3 or .parquet files into memory-mapped format. Optional, but I also highly recommend to install and use [nt-summary-stats](https://github.com/felixyu7/nt-summary-stats) if you are going to use summary statistic features for the more optimized implementation. 
+The memory-mapped dataloader is meant to be used in conjunction with [nt-mmap-converter](https://github.com/felixyu7/nt-mmap-converter), which contains scripts to convert standard neutrino telescope data formats such as .i3 or .parquet files into memory-mapped format. Optional, but I also highly recommend to install and use [nt-summary-stats](https://github.com/felixyu7/nt-summary-stats) if you are going to use summary statistic features for the more optimized implementation. **If you are training on a cluster, ensure your memory-mapped files are on local (scratch) storage and not on network-mounted filesystems, otherwise it will lag!**
 
 ```python
 from ml_common.dataloaders import MmapDataset, create_dataloaders
