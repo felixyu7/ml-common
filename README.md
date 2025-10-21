@@ -70,25 +70,17 @@ trainer.test(test_loader)
 from ml_common.losses import (
     angular_distance_loss,
     von_mises_fisher_loss,
-    gaussian_nll_loss,
-    spherical_harmonic_loss,
+    gaussian_nll_loss
 )
 
 loss = angular_distance_loss(pred_dirs, true_dirs)
 loss = von_mises_fisher_loss(pred_dirs, true_dirs)
 loss = gaussian_nll_loss(mu, var, target)
-# Optional: requires `spherical-harmonics-loss`
-from spherical_harmonics_loss import get_n_coeffs
-
-l_max = 4
-coeffs = torch.randn(batch_size, get_n_coeffs(l_max))
-directions = torch.randn(batch_size, 3)
-loss = spherical_harmonic_loss(coeffs, directions, l_max=l_max)
 ```
 
-Install `spherical-harmonics-loss` alongside `ml-common` to enable the helper.
-
 ### Datasets
+
+The memory-mapped dataloader is meant to be used in conjunction with [nt-mmap-converter](https://github.com/felixyu7/nt-mmap-converter), which contains scripts to convert standard neutrino telescope data formats such as .i3 or .parquet files into memory-mapped format. Optional, but I also highly recommend to install and use [nt-summary-stats](https://github.com/felixyu7/nt-summary-stats) if you are going to use summary statistic features for the more optimized implementation. 
 
 ```python
 from ml_common.dataloaders import MmapDataset, create_dataloaders
