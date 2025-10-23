@@ -115,7 +115,10 @@ class MmapDataset(torch.utils.data.Dataset):
         if start_idx >= end_idx:
             raise ValueError(f"Invalid photon indices: {start_idx} >= {end_idx}")
 
-        photons = photons_array[start_idx:end_idx]
+        photons = photons_array[start_idx:end_idx].copy()
+        
+        # subtract minimum photon hit time so event starts at t=0
+        photons['t'] -= photons['t'].min()
 
         # Process photons
         if self.use_summary_stats and len(photons) > 0:
