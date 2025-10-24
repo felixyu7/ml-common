@@ -40,6 +40,8 @@ class MmapDataset(torch.utils.data.Dataset):
             val_split: Validation fraction (when split != "full")
             split_seed: Random seed for reproducible splitting
         """
+        if use_summary_stats and not HAS_SUMMARY_STATS:
+            raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
 
         if isinstance(mmap_paths, str):
