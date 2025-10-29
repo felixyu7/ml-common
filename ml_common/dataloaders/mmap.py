@@ -2,7 +2,7 @@
 
 import torch
 import numpy as np
-from typing import Union, List, Tuple
+from typing import Union, List, Tuple, Optional
 
 try:
     import nt_summary_stats
@@ -28,7 +28,8 @@ class MmapDataset(torch.utils.data.Dataset):
         use_summary_stats: bool = True,
         split: str = "full",
         val_split: float = 0.2,
-        split_seed: int = 42
+        split_seed: int = 42,
+        task: Optional[str] = None
     ):
         """
         Initialize MmapDataset.
@@ -39,6 +40,10 @@ class MmapDataset(torch.utils.data.Dataset):
             split: "train", "val", or "full"
             val_split: Validation fraction (when split != "full")
             split_seed: Random seed for reproducible splitting
+            task: Task identifier used for validation. Supported values are
+                None/"event_reconstruction" (default) and "starting_classification".
+                When set to "starting_classification" the dataset checks that the
+                event record contains a 'starting' field.
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
@@ -70,6 +75,9 @@ class MmapDataset(torch.utils.data.Dataset):
 
         self.total_events = total_length
         self.photon_dtype = photon_dtype
+        self.task = (task or 'event_reconstruction').lower()
+        if self.task not in {'event_reconstruction', 'starting_classification'}:
+            raise ValueError(f"Unsupported task '{task}'. Expected 'event_reconstruction' or 'starting_classification'.")
 
         # Handle train/val splitting
         if split in ["train", "val"]:
@@ -98,7 +106,7 @@ class MmapDataset(torch.utils.data.Dataset):
         Returns:
             coords: [N, 4] (x, y, z, t)
             features: [N, F]
-            labels: [L] (log_energy, dir_x, dir_y, dir_z, [pid])
+            labels: [log_energy, dir_x, dir_y, dir_z, pid, starting_flag]
         """
         # Map split index to global index
         global_idx = self.indices[idx] if self.indices is not None else idx
@@ -166,15 +174,22 @@ class MmapDataset(torch.utils.data.Dataset):
         dir_y = np.sin(initial_zenith) * np.sin(initial_azimuth)
         dir_z = np.cos(initial_zenith)
 
+        starting_available = 'starting' in event_record.dtype.names
+        if not starting_available and self.task == 'starting_classification':
+            raise KeyError("Event record does not contain 'starting'; cannot build starting_classification labels.")
+
+        starting_flag = float(event_record['starting']) if starting_available else 0.0
+        starting_flag = 1.0 if starting_flag >= 0.5 else 0.0
+
         if self.dataset_type == 'prometheus':
             pid = event_record['initial_type']
-            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid], dtype=np.float32)
+            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag], dtype=np.float32)
         else:
             # check if interaction contains 'CC'
             if 'CC' in event_record['interaction']:
                 pid = 1  # charged current
             else:
                 pid = 0  # neutral current or unknown
-            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid], dtype=np.float32)
+            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag], dtype=np.float32)
 
         return pos, feats, labels

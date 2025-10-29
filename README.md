@@ -93,6 +93,8 @@ dataset = MmapDataset(
     val_split=0.2
 )
 
+# Labels follow [log_energy, dir_x, dir_y, dir_z, pid, starting_flag]
+
 # Or use the factory
 train_loader, val_loader = create_dataloaders(cfg)
 ```

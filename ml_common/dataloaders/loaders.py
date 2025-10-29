@@ -58,6 +58,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     """
     data_options = cfg['data_options']
     dataloader_type = cfg['dataloader']
+    task = cfg.get('task') or data_options.get('task')
 
     if dataloader_type == 'i3':
         if not ICECUBE_AVAILABLE:
@@ -110,7 +111,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 use_summary_stats=data_options.get('use_summary_stats', True),
                 split="train",
                 val_split=val_split,
-                split_seed=split_seed
+                split_seed=split_seed,
+                task=task
             )
 
             valid_dataset = MmapDataset(
@@ -118,7 +120,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 use_summary_stats=data_options.get('use_summary_stats', True),
                 split="val",
                 val_split=val_split,
-                split_seed=split_seed
+                split_seed=split_seed,
+                task=task
             )
 
         else:
@@ -155,11 +158,13 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 train_dataset = MmapDataset(
                     mmap_paths=data_options['train_data_path'],
                     use_summary_stats=data_options.get('use_summary_stats', True),
+                    task=task,
                 )
 
                 valid_dataset = MmapDataset(
                     mmap_paths=data_options['valid_data_path'],
                     use_summary_stats=data_options.get('use_summary_stats', True),
+                    task=task,
                 )
 
         train_len = len(train_dataset)
