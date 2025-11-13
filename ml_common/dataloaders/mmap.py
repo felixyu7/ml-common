@@ -185,11 +185,8 @@ class MmapDataset(torch.utils.data.Dataset):
             pid = event_record['initial_type']
             labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag], dtype=np.float32)
         else:
-            # check if interaction contains 'CC'
-            if 'CC' in event_record['interaction']:
-                pid = 1  # charged current
-            else:
-                pid = 0  # neutral current or unknown
-            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag], dtype=np.float32)
+            # 0: cascade, 1: through-going track, 2: starting track, 3: stopping track, 4: passing track, 5: bundle/other
+            morphology = event_record['morphology']
+            labels = np.array([log_energy, dir_x, dir_y, dir_z, morphology, starting_flag], dtype=np.float32)
 
         return pos, feats, labels
