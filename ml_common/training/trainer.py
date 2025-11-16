@@ -403,21 +403,11 @@ class Trainer:
 
         for epoch in epoch_pbar:
             self.current_epoch = epoch
-            if hasattr(self.loss_fn, 'set_epoch_progress'):
-                if self.epochs <= 1:
-                    progress = 0.0
-                else:
-                    progress = epoch / (self.epochs - 1)
-                self.loss_fn.set_epoch_progress(progress)
-
             train_metrics = self.train_epoch(train_loader)
             val_metrics = self.validate(val_loader)
             self.scheduler.step()
 
             epoch_metrics = {**train_metrics, **val_metrics}
-            if self.use_wandb and hasattr(self.loss_fn, 'current_weights'):
-                vmf_weight, _ = self.loss_fn.current_weights()
-                epoch_metrics['vmf_weight'] = float(vmf_weight)
             self.log_metrics(epoch_metrics)
 
             is_best = val_metrics['val_loss'] < self.best_val_loss
