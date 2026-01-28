@@ -5,6 +5,15 @@ import torch
 from typing import List, Tuple, Any, Union, Dict
 
 
+def _to_tensor(x: Any) -> torch.Tensor:
+    """Convert input to float32 tensor without redundant copies."""
+    if isinstance(x, torch.Tensor):
+        return x.float() if x.dtype != torch.float32 else x
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x.astype(np.float32, copy=False))
+    return torch.as_tensor(x, dtype=torch.float32)
+
+
 class IrregularDataCollator:
     """
     Collates variable-length point cloud data without padding.
@@ -25,9 +34,9 @@ class IrregularDataCollator:
             features_b: [sum_i N_i, F]
             labels_b: [B, L]
         """
-        batch_coords: List[np.ndarray] = []
-        batch_features: List[np.ndarray] = []
-        batch_labels: List[np.ndarray] = []
+        batch_coords: List[torch.Tensor] = []
+        batch_features: List[torch.Tensor] = []
+        batch_labels: List[torch.Tensor] = []
 
         for batch_idx, event in enumerate(batch):
             if isinstance(event, dict):
@@ -46,13 +55,13 @@ class IrregularDataCollator:
                         f"Sample must be tuple (coords, features, labels) or dict. Got: {type(event)}"
                     ) from e
 
-            coords = np.asarray(coords, dtype=np.float32)
-            features = np.asarray(features, dtype=np.float32)
-            labels = np.asarray(labels, dtype=np.float32)
+            coords = _to_tensor(coords)
+            features = _to_tensor(features)
+            labels = _to_tensor(labels)
 
             # Add batch index as first column to coords
-            batch_indices = np.full((coords.shape[0], 1), batch_idx, dtype=np.float32)
-            coords_with_batch = np.concatenate([batch_indices, coords], axis=1)
+            batch_indices = torch.full((coords.shape[0], 1), batch_idx, dtype=torch.float32)
+            coords_with_batch = torch.cat([batch_indices, coords], dim=1)
 
             batch_coords.append(coords_with_batch)
             batch_features.append(features)
@@ -64,12 +73,8 @@ class IrregularDataCollator:
             features_b = torch.empty((0, 0), dtype=torch.float32)
             labels_b = torch.empty((0,), dtype=torch.float32)
         else:
-            coords_b = torch.from_numpy(np.vstack(batch_coords)).float()
-            features_b = torch.from_numpy(np.vstack(batch_features)).float()
-            try:
-                labels_np = np.stack(batch_labels, axis=0).astype(np.float32)
-            except ValueError:
-                labels_np = np.array(batch_labels, dtype=np.float32)
-            labels_b = torch.from_numpy(labels_np).float()
+            coords_b = torch.cat(batch_coords, dim=0)
+            features_b = torch.cat(batch_features, dim=0)
+            labels_b = torch.stack(batch_labels, dim=0)
 
         return coords_b, features_b, labels_b

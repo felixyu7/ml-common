@@ -106,7 +106,8 @@ class MmapDataset(torch.utils.data.Dataset):
         Returns:
             coords: [N, 4] (x, y, z, t)
             features: [N, F]
-            labels: [log_energy, dir_x, dir_y, dir_z, pid, starting_flag]
+            labels: [log_energy, dir_x, dir_y, dir_z, pid, starting_flag, vertex_x, vertex_y, vertex_z]
+                    vertex coordinates are in meters
         """
         # Map split index to global index
         global_idx = self.indices[idx] if self.indices is not None else idx
@@ -157,11 +158,13 @@ class MmapDataset(torch.utils.data.Dataset):
 
             feats = np.log(sensor_stats.astype(np.float32) + 1)
         else:
-            # Pulse-level: use time and charge as features
+            # Pulse-level: use time, charge, and DOM identifiers as features
             pos = np.column_stack([photons['x'], photons['y'], photons['z'], photons['t']]) / 1000.
             charge_feat = np.log(photons['charge'] + 1).reshape(-1, 1).astype(np.float32)
             time_feat = pos[:, 3:4].astype(np.float32)
-            feats = np.concatenate([time_feat, charge_feat], axis=1)
+            string_id = photons['string_id'].reshape(-1, 1).astype(np.float32)
+            sensor_id = photons['sensor_id'].reshape(-1, 1).astype(np.float32)
+            feats = np.concatenate([time_feat, charge_feat, string_id, sensor_id], axis=1)
 
         # Extract labels
         initial_zenith = event_record['initial_zenith']
@@ -169,10 +172,15 @@ class MmapDataset(torch.utils.data.Dataset):
         initial_energy = event_record['initial_energy']
         log_energy = np.log10(max(initial_energy, 1e-6))
 
-        # Spherical to Cartesian
+        # Spherical to Cartesian direction
         dir_x = np.sin(initial_zenith) * np.cos(initial_azimuth)
         dir_y = np.sin(initial_zenith) * np.sin(initial_azimuth)
         dir_z = np.cos(initial_zenith)
+
+        # True vertex position (meters)
+        vertex_x = event_record['initial_x']
+        vertex_y = event_record['initial_y']
+        vertex_z = event_record['initial_z']
 
         starting_available = 'starting' in event_record.dtype.names
         if not starting_available and self.task == 'starting_classification':
@@ -183,10 +191,10 @@ class MmapDataset(torch.utils.data.Dataset):
 
         if self.dataset_type == 'prometheus':
             pid = event_record['initial_type']
-            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag], dtype=np.float32)
+            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
         else:
             # 0: cascade, 1: through-going track, 2: starting track, 3: stopping track, 4: passing track, 5: bundle/other
             morphology = event_record['morphology']
-            labels = np.array([log_energy, dir_x, dir_y, dir_z, morphology, starting_flag], dtype=np.float32)
+            labels = np.array([log_energy, dir_x, dir_y, dir_z, morphology, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
 
         return pos, feats, labels
