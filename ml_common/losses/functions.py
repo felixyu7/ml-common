@@ -53,11 +53,20 @@ def gaussian_nll_loss(mu: Tensor, var: Tensor, target: Tensor) -> Tensor:
     return torch.mean(nll)
 
 
-def von_mises_fisher_loss(n_pred: Tensor, n_true: Tensor, eps: float = 1e-8) -> Tensor:
-    """von Mises-Fisher loss for directional data (kappa from ||n_pred||)."""
-    kappa = torch.norm(n_pred, dim=1)
-    logC = -kappa + torch.log((kappa + eps) / (1 - torch.exp(-2 * kappa) + 2 * eps))
-    return -((n_true * n_pred).sum(dim=1) + logC).mean()
+def von_mises_fisher_loss(
+    n_pred: Tensor, n_true: Tensor, kappa_reg: float = 0.01, eps: float = 1e-8
+) -> Tensor:
+    """
+    von Mises-Fisher loss with decoupled direction and κ.
+
+    Expects n_pred [B,4]: direction = n_pred[:,:3], κ = softplus(n_pred[:,3]).
+    The κ head is regularized to prevent explosion while preserving vMF gradient scaling.
+    """
+    direction = F.normalize(n_pred[:, :3], p=2, dim=1)
+    kappa = F.softplus(n_pred[:, 3]) + 0.1
+    cos_sim = (direction * n_true).sum(dim=1)
+    log_C = -kappa + torch.log((kappa + eps) / (1 - torch.exp(-2 * kappa) + 2 * eps))
+    return (-(kappa * cos_sim + log_C) + kappa_reg * kappa).mean()
 
 
 def spherical_harmonic_loss(
@@ -114,20 +123,3 @@ def spherical_harmonic_loss(
 
     loss_module = loss_module.to(coeffs.device)
     return loss_module(coeffs, target_dirs)
-
-
-class CombinedDirectionalLoss:
-    """Weighted sum of VMF and angular distance losses."""
-
-    def __init__(self, *, vmf_weight: float = 0.5, angular_weight: float = 0.5):
-        if vmf_weight < 0 or angular_weight < 0:
-            raise ValueError("Loss weights must be non-negative.")
-        if vmf_weight == 0 and angular_weight == 0:
-            raise ValueError("At least one loss component must have a positive weight.")
-        self.vmf_weight = float(vmf_weight)
-        self.angular_weight = float(angular_weight)
-
-    def __call__(self, pred: Tensor, truth: Tensor) -> Tensor:
-        vmf_loss = von_mises_fisher_loss(pred, truth)
-        angular_loss = angular_distance_loss(pred, truth, reduction="mean")
-        return self.vmf_weight * vmf_loss + self.angular_weight * angular_loss
