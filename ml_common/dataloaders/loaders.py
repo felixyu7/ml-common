@@ -6,6 +6,7 @@ from typing import Dict, Any, Tuple
 from .mmap import MmapDataset
 from .kaggle import KaggleDataset, load_sensor_geometry, get_icecube_file_names
 from .i3 import I3IterableDataset, ICECUBE_AVAILABLE
+from .parquet import ParquetDataset
 from ..utils.collators import IrregularDataCollator
 from ..utils.samplers import RandomChunkSampler
 
@@ -96,6 +97,62 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
 
         train_sampler = None
         val_sampler = None
+
+    elif dataloader_type == 'parquet':
+        # Parquet format with stochastic loss info (Prometheus MC)
+        val_split = data_options.get('val_split', 0.2)
+        split_seed = data_options.get('split_seed', 42)
+        max_cascades = data_options.get('max_cascades', 100)
+        min_cascade_energy = data_options.get('min_cascade_energy', 0.5)
+        cache_size = data_options.get('cache_size', 2)
+
+        if 'data_path' in data_options:
+            # Single path with runtime splitting
+            train_dataset = ParquetDataset(
+                parquet_paths=data_options['data_path'],
+                use_summary_stats=data_options.get('use_summary_stats', True),
+                split="train",
+                val_split=val_split,
+                split_seed=split_seed,
+                task=task,
+                max_cascades=max_cascades,
+                min_cascade_energy=min_cascade_energy,
+                cache_size=cache_size,
+            )
+
+            valid_dataset = ParquetDataset(
+                parquet_paths=data_options['data_path'],
+                use_summary_stats=data_options.get('use_summary_stats', True),
+                split="val",
+                val_split=val_split,
+                split_seed=split_seed,
+                task=task,
+                max_cascades=max_cascades,
+                min_cascade_energy=min_cascade_energy,
+                cache_size=cache_size,
+            )
+        else:
+            # Separate train/valid paths
+            train_dataset = ParquetDataset(
+                parquet_paths=data_options['train_data_path'],
+                use_summary_stats=data_options.get('use_summary_stats', True),
+                task=task,
+                max_cascades=max_cascades,
+                min_cascade_energy=min_cascade_energy,
+                cache_size=cache_size,
+            )
+
+            valid_dataset = ParquetDataset(
+                parquet_paths=data_options['valid_data_path'],
+                use_summary_stats=data_options.get('use_summary_stats', True),
+                task=task,
+                max_cascades=max_cascades,
+                min_cascade_energy=min_cascade_energy,
+                cache_size=cache_size,
+            )
+
+        train_sampler = RandomSampler(train_dataset)
+        val_sampler = RandomSampler(valid_dataset)
 
     else:
         # Single path with runtime splitting
