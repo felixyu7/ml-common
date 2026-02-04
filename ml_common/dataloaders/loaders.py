@@ -154,6 +154,26 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         train_sampler = RandomSampler(train_dataset)
         val_sampler = RandomSampler(valid_dataset)
 
+    elif 'data_path_0' in data_options and 'data_path_1' in data_options:
+        # Binary classification with two dataset groups
+        from .mmap import BinaryLabelDataset
+
+        val_split = data_options.get('val_split', 0.2)
+        split_seed = data_options.get('split_seed', 42)
+        use_summary_stats = data_options.get('use_summary_stats', True)
+
+        # Create stratified train/val datasets for each class
+        train_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "train", val_split, split_seed, task)
+        train_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "train", val_split, split_seed, task)
+        val_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "val", val_split, split_seed, task)
+        val_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "val", val_split, split_seed, task)
+
+        train_dataset = BinaryLabelDataset(train_ds_0, train_ds_1)
+        valid_dataset = BinaryLabelDataset(val_ds_0, val_ds_1)
+
+        train_sampler = RandomSampler(train_dataset)
+        val_sampler = RandomSampler(valid_dataset)
+
     else:
         # Single path with runtime splitting
         if 'data_path' in data_options:

@@ -198,3 +198,33 @@ class MmapDataset(torch.utils.data.Dataset):
             labels = np.array([log_energy, dir_x, dir_y, dir_z, morphology, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
 
         return pos, feats, labels
+
+
+class BinaryLabelDataset(torch.utils.data.Dataset):
+    """Wrapper that assigns binary labels to samples from two datasets."""
+
+    def __init__(self, dataset_0: MmapDataset, dataset_1: MmapDataset):
+        """
+        Args:
+            dataset_0: Dataset for class 0 (e.g., CORSIKA muons)
+            dataset_1: Dataset for class 1 (e.g., NuGen neutrinos)
+        """
+        self.dataset_0 = dataset_0
+        self.dataset_1 = dataset_1
+        self.len_0 = len(dataset_0)
+        self.len_1 = len(dataset_1)
+
+    def __len__(self):
+        return self.len_0 + self.len_1
+
+    def __getitem__(self, idx):
+        if idx < self.len_0:
+            pos, feats, labels = self.dataset_0[idx]
+            binary_label = 0.0
+        else:
+            pos, feats, labels = self.dataset_1[idx - self.len_0]
+            binary_label = 1.0
+
+        # Append binary label as last element (same convention as starting_classification)
+        labels = np.append(labels, binary_label)
+        return pos, feats, labels
