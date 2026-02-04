@@ -193,7 +193,7 @@ class MmapDataset(torch.utils.data.Dataset):
             pid = event_record['initial_type']
             labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
         else:
-            # 0: cascade, 1: through-going track, 2: starting track, 3: stopping track, 4: passing track, 5: bundle/other
+            # 0: cascade, 1: starting track, 2: throughgoing track, 3: stopping track, 4: uncontained, 5: bundle
             morphology = event_record['morphology']
             labels = np.array([log_energy, dir_x, dir_y, dir_z, morphology, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
 
