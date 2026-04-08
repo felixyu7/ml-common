@@ -1,6 +1,8 @@
 """Unified dataloader factory for creating train/val dataloaders."""
 
-from torch.utils.data import DataLoader, RandomSampler
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, RandomSampler, WeightedRandomSampler
 from typing import Dict, Any, Tuple
 
 from .mmap import MmapDataset
@@ -9,6 +11,27 @@ from .i3 import I3IterableDataset, ICECUBE_AVAILABLE
 from .parquet import ParquetDataset
 from ..utils.collators import IrregularDataCollator
 from ..utils.samplers import RandomChunkSampler
+from ..utils.energy_weights import compute_energy_weights, extract_energies
+
+
+def _make_train_sampler(dataset, data_options):
+    """Create a train sampler, optionally with energy-based weighting."""
+    mode = data_options.get('energy_weighting')
+    if not mode:
+        return RandomSampler(dataset)
+
+    energies, dataset_ids = extract_energies(dataset)
+    weights = compute_energy_weights(
+        energies, mode,
+        spectral_index=data_options.get('spectral_index'),
+        dataset_ids=dataset_ids,
+        n_bins=data_options.get('energy_weight_bins', 50),
+    )
+    print(f"Energy weighting ({mode}): weight range [{weights.min():.2f}, {weights.max():.2f}], "
+          f"median {np.median(weights):.2f}")
+    return WeightedRandomSampler(
+        torch.from_numpy(weights).double(), num_samples=len(dataset), replacement=True
+    )
 
 
 def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
@@ -151,7 +174,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 cache_size=cache_size,
             )
 
-        train_sampler = RandomSampler(train_dataset)
+        train_sampler = _make_train_sampler(train_dataset, data_options)
         val_sampler = RandomSampler(valid_dataset)
 
     elif 'data_path_0' in data_options and 'data_path_1' in data_options:
@@ -171,7 +194,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         train_dataset = BinaryLabelDataset(train_ds_0, train_ds_1)
         valid_dataset = BinaryLabelDataset(val_ds_0, val_ds_1)
 
-        train_sampler = RandomSampler(train_dataset)
+        train_sampler = _make_train_sampler(train_dataset, data_options)
         val_sampler = RandomSampler(valid_dataset)
 
     else:
@@ -253,15 +276,19 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
             train_sampler = RandomChunkSampler(train_dataset, train_dataset.chunks)
             val_sampler = RandomChunkSampler(valid_dataset, valid_dataset.chunks)
         else:
-            train_sampler = RandomSampler(train_dataset)
+            train_sampler = _make_train_sampler(train_dataset, data_options)
             val_sampler = RandomSampler(valid_dataset)
 
     # Get batch size and num_workers
     batch_size = data_options.get('batch_size') or cfg['training_options']['batch_size']
     num_workers = data_options.get('num_workers') or cfg['training_options'].get('num_workers', 0)
 
-    # Create dataloaders
-    collate = IrregularDataCollator()
+    # Create dataloaders (separate collators for train DOM dropout)
+    dom_dropout = data_options.get('dom_dropout', 0.0)
+    train_collate = IrregularDataCollator(dom_dropout=dom_dropout)
+    val_collate = IrregularDataCollator(dom_dropout=0.0)
+    val_collate.training = False
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -270,7 +297,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         prefetch_factor=(2 if num_workers > 0 else None),
-        collate_fn=collate
+        collate_fn=train_collate
     )
 
     val_loader = DataLoader(
@@ -281,7 +308,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         prefetch_factor=(2 if num_workers > 0 else None),
-        collate_fn=collate
+        collate_fn=val_collate
     )
 
     def _safe_len(dataset):

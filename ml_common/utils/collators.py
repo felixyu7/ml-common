@@ -20,6 +20,10 @@ class IrregularDataCollator:
     Returns concatenated points with batch indices for segment-wise pooling.
     """
 
+    def __init__(self, dom_dropout: float = 0.0):
+        self.dom_dropout = dom_dropout
+        self.training = True
+
     def __call__(
         self, batch: List[Union[Tuple[Any, Any, Any], Dict[str, Any]]]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -58,6 +62,15 @@ class IrregularDataCollator:
             coords = _to_tensor(coords)
             features = _to_tensor(features)
             labels = _to_tensor(labels)
+
+            # DOM dropout: randomly drop a fraction of DOMs during training
+            if self.dom_dropout > 0 and self.training:
+                n = coords.shape[0]
+                keep = max(1, int(n * (1 - self.dom_dropout)))
+                if keep < n:
+                    perm = torch.randperm(n)[:keep]
+                    coords = coords[perm]
+                    features = features[perm]
 
             # Add batch index as first column to coords
             batch_indices = torch.full((coords.shape[0], 1), batch_idx, dtype=torch.float32)
