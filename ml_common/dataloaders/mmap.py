@@ -14,6 +14,33 @@ except ImportError:
 from ..utils.io import load_ntmmap
 
 
+def _normalize_summary_stats(sensor_stats: np.ndarray, extended: bool) -> np.ndarray:
+    """Per-feature normalization for summary statistics.
+
+    For the 25 extended features:
+      - Absolute time percentiles (indices 4-7, 9-14) are converted to
+        deltas relative to first_hit_time before log1p.
+      - q_max_frac (22) and t_skewness (24) use identity (no transform).
+      - All other features use log1p.
+    """
+    stats = sensor_stats.astype(np.float32)
+    if not extended:
+        return np.log1p(stats)
+
+    # Convert absolute time percentiles to Δt from first_hit_time
+    first_t = stats[:, 3:4]  # [N, 1]
+    dt_idx = [4, 5, 6, 7, 9, 10, 11, 12, 13, 14]
+    stats[:, dt_idx] = np.maximum(stats[:, dt_idx] - first_t, 0.0)
+
+    # log1p for most features; identity for q_max_frac (22) and t_skewness (24)
+    log1p_idx = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,23]
+    feats = np.empty_like(stats)
+    feats[:, log1p_idx] = np.log1p(stats[:, log1p_idx])
+    feats[:, 22] = stats[:, 22]
+    feats[:, 24] = stats[:, 24]
+    return feats
+
+
 class MmapDataset(torch.utils.data.Dataset):
     """
     Memory-mapped dataset for neutrino detector data.
@@ -29,7 +56,8 @@ class MmapDataset(torch.utils.data.Dataset):
         split: str = "full",
         val_split: float = 0.2,
         split_seed: int = 42,
-        task: Optional[str] = None
+        task: Optional[str] = None,
+        extended_stats: bool = False,
     ):
         """
         Initialize MmapDataset.
@@ -48,6 +76,7 @@ class MmapDataset(torch.utils.data.Dataset):
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
+        self.extended_stats = extended_stats
 
         if isinstance(mmap_paths, str):
             mmap_paths = [mmap_paths]
@@ -146,7 +175,9 @@ class MmapDataset(torch.utils.data.Dataset):
             if self.dataset_type == 'prometheus' and 'id_idx' in photons.dtype.names:
                 photons_dict['id_idx'] = photons['id_idx']
 
-            sensor_positions, sensor_stats = nt_summary_stats.process_event(photons_dict)
+            sensor_positions, sensor_stats = nt_summary_stats.process_event(
+                photons_dict, extended=self.extended_stats
+            )
 
             # 4D coords: x, y, z, first_hit_time
             pos = np.column_stack([
@@ -156,7 +187,7 @@ class MmapDataset(torch.utils.data.Dataset):
                 sensor_stats[:, 3]  # first hit time
             ]).astype(np.float32) / 1000.  # convert to km/microseconds
 
-            feats = np.log(sensor_stats.astype(np.float32) + 1)
+            feats = _normalize_summary_stats(sensor_stats, self.extended_stats)
         else:
             # Pulse-level: use time, charge, and DOM identifiers as features
             pos = np.column_stack([photons['x'], photons['y'], photons['z'], photons['t']]) / 1000.

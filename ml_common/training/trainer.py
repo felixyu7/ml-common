@@ -84,13 +84,28 @@ class Trainer:
             )
 
     def _setup_optimizer_and_scheduler(self, training_opts: Dict[str, Any]) -> Tuple:
-        """Setup optimizer and learning rate scheduler."""
+        """Setup optimizer and learning rate scheduler with optional linear warmup."""
         optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-        # Default: cosine annealing that completes one cycle over all epochs
         T_max = training_opts.get('T_max', self.epochs)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max)
+        warmup_epochs = training_opts.get(
+            'warmup_epochs', max(1, round(self.epochs * 0.05)) if self.epochs >= 10 else 0
+        )
+
+        if warmup_epochs > 0:
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_epochs
+            )
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(1, T_max - warmup_epochs)
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs]
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max)
+
         return optimizer, scheduler
 
     def _setup_mixed_precision(self) -> Optional[torch.amp.GradScaler]:

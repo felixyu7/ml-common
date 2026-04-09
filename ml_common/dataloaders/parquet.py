@@ -19,6 +19,8 @@ except ImportError:
     nt_summary_stats = None
     HAS_SUMMARY_STATS = False
 
+from .mmap import _normalize_summary_stats
+
 
 # Stochastic loss types from prometheus (exclude type 1 = delta ray/ionization)
 # 0: bremsstrahlung, 2: pair production, 3: photonuclear, 4: muon pair production
@@ -54,6 +56,7 @@ class ParquetDataset(torch.utils.data.Dataset):
         max_stochastic: int = 100,
         min_stochastic_energy: float = 0.5,
         cache_size: int = 20,
+        extended_stats: bool = False,
     ):
         """
         Initialize ParquetDataset.
@@ -75,6 +78,7 @@ class ParquetDataset(torch.utils.data.Dataset):
                 "Please do 'pip install nt-summary-stats'."
             )
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
+        self.extended_stats = extended_stats
         self.max_stochastic = max_stochastic
         self.min_stochastic_energy = min_stochastic_energy
         self.cache_size = cache_size
@@ -206,7 +210,9 @@ class ParquetDataset(torch.utils.data.Dataset):
             if 'id_idx' in photons:
                 photons_dict['id_idx'] = np.array(photons['id_idx'])
 
-            sensor_positions, sensor_stats = nt_summary_stats.process_event(photons_dict)
+            sensor_positions, sensor_stats = nt_summary_stats.process_event(
+                photons_dict, extended=self.extended_stats
+            )
 
             # 4D coords: x, y, z, first_hit_time (in km/microseconds)
             pos = np.column_stack([
@@ -216,7 +222,7 @@ class ParquetDataset(torch.utils.data.Dataset):
                 sensor_stats[:, 3]  # first hit time
             ]).astype(np.float32) / 1000.  # convert m/ns to km/us
 
-            feats = np.log(sensor_stats.astype(np.float32) + 1)
+            feats = _normalize_summary_stats(sensor_stats, self.extended_stats)
         else:
             # Pulse-level (no aggregation)
             # Features: [placeholder, log(charge+1), string_id, sensor_id] to match MmapDataset format
