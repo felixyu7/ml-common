@@ -80,3 +80,41 @@ class RandomChunkSampler(Sampler[int]):
 
     def __len__(self) -> int:
         return self.num_samples
+
+
+class LargeWeightedRandomSampler(Sampler[int]):
+    """Weighted sampler with replacement that bypasses torch.multinomial's 2^24 limit.
+
+    Uses numpy inverse-CDF sampling, so it works for datasets of any size.
+    """
+
+    def __init__(self, weights, num_samples: int, generator=None) -> None:
+        if isinstance(weights, torch.Tensor):
+            weights = weights.detach().cpu().numpy()
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.ndim != 1:
+            raise ValueError(f"weights must be 1D, got shape {weights.shape}")
+        if (weights < 0).any():
+            raise ValueError("weights must be non-negative")
+        total = weights.sum()
+        if not np.isfinite(total) or total <= 0:
+            raise ValueError("weights must have finite, positive sum")
+
+        self._cum_weights = np.cumsum(weights)
+        self._total = float(self._cum_weights[-1])
+        self._num_samples = int(num_samples)
+        self.generator = generator
+
+    def __iter__(self) -> Iterator[int]:
+        if self.generator is None:
+            seed = int(torch.empty((), dtype=torch.int64).random_().item())
+        else:
+            seed = int(torch.empty((), dtype=torch.int64).random_(generator=self.generator).item())
+        rng = np.random.default_rng(seed)
+        u = rng.uniform(0.0, self._total, size=self._num_samples)
+        indices = np.searchsorted(self._cum_weights, u, side='right')
+        np.clip(indices, 0, self._cum_weights.shape[0] - 1, out=indices)
+        yield from indices.tolist()
+
+    def __len__(self) -> int:
+        return self._num_samples

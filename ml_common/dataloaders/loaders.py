@@ -2,7 +2,7 @@
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, RandomSampler, WeightedRandomSampler
+from torch.utils.data import DataLoader, RandomSampler
 from typing import Dict, Any, Tuple
 
 from .mmap import MmapDataset
@@ -10,7 +10,7 @@ from .kaggle import KaggleDataset, load_sensor_geometry, get_icecube_file_names
 from .i3 import I3IterableDataset, ICECUBE_AVAILABLE
 from .parquet import ParquetDataset
 from ..utils.collators import IrregularDataCollator
-from ..utils.samplers import RandomChunkSampler
+from ..utils.samplers import RandomChunkSampler, LargeWeightedRandomSampler
 from ..utils.energy_weights import compute_energy_weights, extract_energies
 
 
@@ -29,9 +29,7 @@ def _make_train_sampler(dataset, data_options):
     )
     print(f"Energy weighting ({mode}): weight range [{weights.min():.2f}, {weights.max():.2f}], "
           f"median {np.median(weights):.2f}")
-    return WeightedRandomSampler(
-        torch.from_numpy(weights).double(), num_samples=len(dataset), replacement=True
-    )
+    return LargeWeightedRandomSampler(weights, num_samples=len(dataset))
 
 
 def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
