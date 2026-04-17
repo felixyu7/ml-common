@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, Tuple
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from contextlib import nullcontext
@@ -58,9 +59,10 @@ class Trainer:
         self.save_epochs = training_opts.get('save_epochs', 5)
         self.grad_clip = training_opts.get('grad_clip', 1.0)
 
-        # Setup optimizer, scheduler, mixed precision, and logging
+        # Setup optimizer, scheduler, mixed precision, EMA, and logging
         self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler(training_opts)
         self.scaler = self._setup_mixed_precision()
+        self.ema_model = self._setup_ema(training_opts)
         self._setup_logging()
 
         # Training state
@@ -85,8 +87,18 @@ class Trainer:
 
     def _setup_optimizer_and_scheduler(self, training_opts: Dict[str, Any]) -> Tuple:
         """Setup optimizer and learning rate scheduler with optional linear warmup."""
+        # Decay matmul/embedding weights only; exclude norms, biases, LayerScale gammas (all 1D).
+        decay_params, no_decay_params = [], []
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            (decay_params if p.ndim >= 2 else no_decay_params).append(p)
         optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            [
+                {'params': decay_params, 'weight_decay': self.weight_decay},
+                {'params': no_decay_params, 'weight_decay': 0.0},
+            ],
+            lr=self.lr,
         )
         T_max = training_opts.get('T_max', self.epochs)
         warmup_epochs = training_opts.get(
@@ -123,6 +135,13 @@ class Trainer:
         if self.amp_device == 'cuda' and self.amp_dtype is torch.float16:
             return torch.amp.GradScaler(self.amp_device)
         return None
+
+    def _setup_ema(self, training_opts: Dict[str, Any]) -> Optional[AveragedModel]:
+        """Setup EMA shadow weights for evaluation. Disabled when ema_decay <= 0."""
+        decay = float(training_opts.get('ema_decay', 0.0))
+        if decay <= 0.0:
+            return None
+        return AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(decay))
 
     def _setup_logging(self):
         """Setup logging directories and CSV writer."""
@@ -236,6 +255,9 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
 
+            if self.ema_model is not None:
+                self.ema_model.update_parameters(self.model)
+
             running_loss += loss.item()
             pbar.set_postfix({
                 'Loss': f'{loss.item():.6f}',
@@ -281,7 +303,8 @@ class Trainer:
         if self.loss_fn is None:
             raise ValueError("loss_fn must be provided")
 
-        self.model.eval()
+        eval_model = self.ema_model if self.ema_model is not None else self.model
+        eval_model.eval()
         total_loss = 0.0
         all_preds, all_labels = [], []
         forward_times = []
@@ -312,7 +335,7 @@ class Trainer:
                 with self._get_autocast_context():
                     if profile:
                         t0 = time.time()
-                    preds = self.model(coords, feats, batch_ids=batch_ids)
+                    preds = eval_model(coords, feats, batch_ids=batch_ids)
                     if profile:
                         if self.device.type == 'cuda':
                             torch.cuda.synchronize()
@@ -365,6 +388,9 @@ class Trainer:
         if self.scaler is not None:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
 
+        if self.ema_model is not None:
+            checkpoint['ema_model_state_dict'] = self.ema_model.state_dict()
+
         # Regular checkpoint
         if self.current_epoch % self.save_epochs == 0 or is_final:
             if is_final:
@@ -395,6 +421,14 @@ class Trainer:
         """Load checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
+
+        if self.ema_model is not None:
+            if 'ema_model_state_dict' in checkpoint:
+                self.ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+            else:
+                # Initialize EMA from loaded weights when checkpoint predates EMA support.
+                for ema_p, p in zip(self.ema_model.parameters(), self.model.parameters()):
+                    ema_p.data.copy_(p.data)
 
         if resume_training:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
