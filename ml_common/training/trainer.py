@@ -418,6 +418,8 @@ class Trainer:
 
         for epoch in epoch_pbar:
             self.current_epoch = epoch
+            if hasattr(self.loss_fn, 'set_epoch'):
+                self.loss_fn.set_epoch(epoch)
             train_metrics = self.train_epoch(train_loader)
             val_metrics = self.validate(val_loader)
             self.scheduler.step()
