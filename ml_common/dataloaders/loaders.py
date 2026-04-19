@@ -21,13 +21,16 @@ def _make_train_sampler(dataset, data_options):
         return RandomSampler(dataset)
 
     energies, dataset_ids = extract_energies(dataset)
+    target_index = data_options.get('target_index', 1.0)
     weights = compute_energy_weights(
         energies, mode,
         spectral_index=data_options.get('spectral_index'),
         dataset_ids=dataset_ids,
         n_bins=data_options.get('energy_weight_bins', 50),
+        target_index=target_index,
     )
-    print(f"Energy weighting ({mode}): weight range [{weights.min():.2f}, {weights.max():.2f}], "
+    print(f"Energy weighting ({mode}, target_index={target_index}): "
+          f"weight range [{weights.min():.2f}, {weights.max():.2f}], "
           f"median {np.median(weights):.2f}")
     return LargeWeightedRandomSampler(weights, num_samples=len(dataset))
 

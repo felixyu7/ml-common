@@ -60,6 +60,7 @@ def compute_energy_weights(
     spectral_index: Optional[Union[float, List[float]]] = None,
     dataset_ids: Optional[np.ndarray] = None,
     n_bins: int = 50,
+    target_index: float = 1.0,
 ) -> np.ndarray:
     """Compute per-event sampling weights based on energy distribution.
 
@@ -70,6 +71,8 @@ def compute_energy_weights(
             Float for single dataset, list for per-dataset values. Required for si/si+flat.
         dataset_ids: [N] sub-dataset index per event (for per-dataset spectral_index)
         n_bins: number of log10(E) bins for flat weighting
+        target_index: target spectral index for si reweighting (default 1.0 = flat in log E).
+            E.g. 1.5 reweights to E^-1.5 instead of E^-1.
 
     Returns:
         weights: [N] normalized so weights.sum() == len(weights)
@@ -77,13 +80,13 @@ def compute_energy_weights(
     log_e = np.log10(np.maximum(energies_gev, 1e-6))
 
     if mode == "si":
-        weights = _si_weights(energies_gev, spectral_index, dataset_ids)
+        weights = _si_weights(energies_gev, spectral_index, dataset_ids, target_index)
     elif mode == "flat":
-        weights = _flat_weights(log_e, n_bins)
+        weights = _flat_weights(log_e, n_bins, target_index=target_index)
     elif mode == "si+flat":
-        weights = _si_weights(energies_gev, spectral_index, dataset_ids)
-        # Flatten residual non-uniformity after si correction
-        weights *= _flat_weights(log_e, n_bins, sample_weights=weights)
+        weights = _si_weights(energies_gev, spectral_index, dataset_ids, target_index)
+        # Shape residual non-uniformity to target spectrum after si correction
+        weights *= _flat_weights(log_e, n_bins, sample_weights=weights, target_index=target_index)
     else:
         raise ValueError(f"Unknown energy_weighting mode: '{mode}'")
 
@@ -95,8 +98,9 @@ def _si_weights(
     energies_gev: np.ndarray,
     spectral_index: Optional[Union[float, List[float]]],
     dataset_ids: Optional[np.ndarray],
+    target_index: float,
 ) -> np.ndarray:
-    """Spectral index reweighting: E^(gamma - 1) undoes E^-gamma -> E^-1 (flat in log E)."""
+    """Spectral index reweighting: E^(gamma_gen - gamma_target) maps E^-gamma_gen -> E^-gamma_target."""
     if spectral_index is None:
         raise ValueError("spectral_index required for 'si' and 'si+flat' modes")
 
@@ -104,9 +108,9 @@ def _si_weights(
         gamma = np.array(spectral_index, dtype=np.float64)
         if dataset_ids is None:
             raise ValueError("dataset_ids required when spectral_index is a list")
-        exponents = gamma[dataset_ids] - 1.0
+        exponents = gamma[dataset_ids] - target_index
     else:
-        exponents = float(spectral_index) - 1.0
+        exponents = float(spectral_index) - target_index
 
     return np.power(np.maximum(energies_gev, 1e-6), exponents)
 
@@ -115,8 +119,13 @@ def _flat_weights(
     log_e: np.ndarray,
     n_bins: int,
     sample_weights: Optional[np.ndarray] = None,
+    target_index: float = 1.0,
 ) -> np.ndarray:
-    """Inverse-density weighting to flatten the log10(E) distribution."""
+    """Inverse-density weighting to shape the log10(E) distribution toward E^-target_index.
+
+    target_index=1.0 yields uniform-per-log-E (flat). target_index>1 down-weights high E
+    so each decade has 10^(1-target_index)x the weight of the decade below it.
+    """
     bin_edges = np.linspace(log_e.min() - 1e-6, log_e.max() + 1e-6, n_bins + 1)
     bin_idx = np.digitize(log_e, bin_edges) - 1
     bin_idx = np.clip(bin_idx, 0, n_bins - 1)
@@ -126,7 +135,10 @@ def _flat_weights(
     else:
         counts = np.bincount(bin_idx, minlength=n_bins).astype(np.float64)
 
-    # Inverse density, zero weight for empty bins
+    # Target per-bin total weight ∝ dN/dlog10E for E^-target_index spectrum
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    target = np.power(10.0, bin_centers * (1.0 - target_index))
+
     safe_counts = np.where(counts > 0, counts, 1.0)
-    bin_weights = np.where(counts > 0, 1.0 / safe_counts, 0.0)
+    bin_weights = np.where(counts > 0, target / safe_counts, 0.0)
     return bin_weights[bin_idx]
