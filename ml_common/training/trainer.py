@@ -66,7 +66,15 @@ class Trainer:
         # Training state
         self.current_epoch = 0
         self.current_step = 0
-        self.best_val_loss = float('inf')
+
+        # Best-checkpoint selection: defaults preserve prior val_loss-minimize behavior
+        self.best_metric_key = training_opts.get('best_metric_key', 'val_loss')
+        self.best_metric_mode = training_opts.get('best_metric_mode', 'min')
+        if self.best_metric_mode not in ('min', 'max'):
+            raise ValueError(
+                f"best_metric_mode must be 'min' or 'max', got '{self.best_metric_mode}'"
+            )
+        self.best_metric_value = float('inf') if self.best_metric_mode == 'min' else float('-inf')
 
     @staticmethod
     def _precision_to_dtype(precision: str) -> Optional[torch.dtype]:
@@ -425,9 +433,15 @@ class Trainer:
             epoch_metrics = {**train_metrics, **val_metrics}
             self.log_metrics(epoch_metrics)
 
-            is_best = val_metrics['val_loss'] < self.best_val_loss
+            current_val = epoch_metrics.get(self.best_metric_key)
+            if current_val is None:
+                is_best = False
+            elif self.best_metric_mode == 'min':
+                is_best = current_val < self.best_metric_value
+            else:
+                is_best = current_val > self.best_metric_value
             if is_best:
-                self.best_val_loss = val_metrics['val_loss']
+                self.best_metric_value = current_val
 
             self.save_checkpoint(epoch_metrics, is_best)
             epoch_pbar.set_postfix({
@@ -435,8 +449,33 @@ class Trainer:
                 'Val Loss': f'{val_metrics["val_loss"]:.6f}'
             })
 
-        self.save_checkpoint({'best_val_loss': self.best_val_loss}, is_final=True)
-        print(f"Training completed! Best validation loss: {self.best_val_loss:.6f}")
+        self.save_checkpoint({f'best_{self.best_metric_key}': self.best_metric_value}, is_final=True)
+        self._log_best_checkpoint_artifact()
+        print(f"Training completed! Best {self.best_metric_key} ({self.best_metric_mode}): {self.best_metric_value:.6f}")
+
+    def _log_best_checkpoint_artifact(self):
+        """Upload best-checkpoint.pt as a wandb artifact at end of training."""
+        if not self.use_wandb:
+            return
+        best_path = self.checkpoint_dir / 'best-checkpoint.pt'
+        if not best_path.exists():
+            return
+        try:
+            import wandb
+            artifact_name = f"{wandb.run.name or wandb.run.id}-best"
+            artifact = wandb.Artifact(
+                artifact_name,
+                type='model',
+                metadata={
+                    'best_metric_key': self.best_metric_key,
+                    'best_metric_mode': self.best_metric_mode,
+                    'best_metric_value': self.best_metric_value,
+                },
+            )
+            artifact.add_file(str(best_path))
+            wandb.log_artifact(artifact, aliases=['best'])
+        except Exception as e:
+            print(f"Could not save best wandb artifact: {e}")
 
     def test(self, test_loader: DataLoader):
         """Run test evaluation."""
