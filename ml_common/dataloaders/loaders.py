@@ -85,6 +85,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     dataloader_type = cfg['dataloader']
     task = cfg.get('task') or data_options.get('task')
     extended_stats = data_options.get('extended_stats', False)
+    morphology_filter = data_options.get('morphology_filter')
 
     if dataloader_type == 'i3':
         if not ICECUBE_AVAILABLE:
@@ -192,10 +193,10 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         use_summary_stats = data_options.get('use_summary_stats', True)
 
         # Create stratified train/val datasets for each class
-        train_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats)
-        train_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats)
-        val_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats)
-        val_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats)
+        train_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
+        train_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
+        val_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
+        val_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
 
         train_dataset = BinaryLabelDataset(train_ds_0, train_ds_1)
         valid_dataset = BinaryLabelDataset(val_ds_0, val_ds_1)
@@ -220,6 +221,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 split_seed=split_seed,
                 task=task,
                 extended_stats=extended_stats,
+                morphology_filter=morphology_filter,
             )
 
             valid_dataset = MmapDataset(
@@ -230,6 +232,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 split_seed=split_seed,
                 task=task,
                 extended_stats=extended_stats,
+                morphology_filter=morphology_filter,
             )
 
         else:
@@ -268,6 +271,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                     use_summary_stats=data_options.get('use_summary_stats', True),
                     task=task,
                     extended_stats=extended_stats,
+                    morphology_filter=morphology_filter,
                 )
 
                 valid_dataset = MmapDataset(
@@ -275,6 +279,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                     use_summary_stats=data_options.get('use_summary_stats', True),
                     task=task,
                     extended_stats=extended_stats,
+                    morphology_filter=morphology_filter,
                 )
 
         train_len = len(train_dataset)

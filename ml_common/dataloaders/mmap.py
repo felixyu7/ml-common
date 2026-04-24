@@ -58,6 +58,7 @@ class MmapDataset(torch.utils.data.Dataset):
         split_seed: int = 42,
         task: Optional[str] = None,
         extended_stats: bool = False,
+        morphology_filter: Optional[List[int]] = None,
     ):
         """
         Initialize MmapDataset.
@@ -72,6 +73,10 @@ class MmapDataset(torch.utils.data.Dataset):
                 None/"event_reconstruction" (default) and "starting_classification".
                 When set to "starting_classification" the dataset checks that the
                 event record contains a 'starting' field.
+            morphology_filter: If provided, restrict the dataset to events whose
+                true morphology is in the given list. IceCube codes:
+                0=cascade, 1=starting track, 2=throughgoing track,
+                3=stopping track, 4=uncontained, 5=bundle. IceCube-only.
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
@@ -108,18 +113,32 @@ class MmapDataset(torch.utils.data.Dataset):
         if self.task not in {'event_reconstruction', 'starting_classification'}:
             raise ValueError(f"Unsupported task '{task}'. Expected 'event_reconstruction' or 'starting_classification'.")
 
-        # Handle train/val splitting
+        # Optional morphology pre-filter (IceCube only)
+        valid_pool = None
+        if morphology_filter is not None:
+            if self.dataset_type != 'icecube':
+                raise ValueError("morphology_filter is only supported for IceCube datasets")
+            allowed = np.asarray(list(morphology_filter), dtype=np.int64)
+            morph = np.concatenate([
+                np.asarray(events['morphology'], dtype=np.int64)
+                for events, _ in self.datasets
+            ])
+            valid_pool = np.where(np.isin(morph, allowed))[0]
+            print(f"Morphology filter {allowed.tolist()}: kept {len(valid_pool):,} / {self.total_events:,} events")
+
+        # Handle train/val splitting (over the filtered pool, if any)
         if split in ["train", "val"]:
             rng = np.random.RandomState(split_seed)
-            indices = rng.permutation(self.total_events)
+            pool = valid_pool if valid_pool is not None else np.arange(self.total_events)
+            shuffled = rng.permutation(pool)
 
-            val_size = int(self.total_events * val_split)
+            val_size = int(len(shuffled) * val_split)
             if split == "val":
-                self.indices = np.sort(indices[:val_size])  # sorted for disk order
+                self.indices = np.sort(shuffled[:val_size])  # sorted for disk order
             else:  # train
-                self.indices = indices[val_size:]
+                self.indices = shuffled[val_size:]
         else:
-            self.indices = None  # full dataset
+            self.indices = valid_pool  # None => all events; array => filtered only
 
         split_length = len(self.indices) if self.indices is not None else self.total_events
         split_str = f" ({split} split from {self.total_events:,} total)" if split != "full" else ""
