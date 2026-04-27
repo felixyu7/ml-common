@@ -2,7 +2,7 @@
 
 import torch
 import numpy as np
-from typing import Union, List, Tuple, Optional
+from typing import Union, List, Tuple, Optional, Dict
 
 try:
     import nt_summary_stats
@@ -58,7 +58,7 @@ class MmapDataset(torch.utils.data.Dataset):
         split_seed: int = 42,
         task: Optional[str] = None,
         extended_stats: bool = False,
-        morphology_filter: Optional[List[int]] = None,
+        morphology_filter: Optional[Union[List[int], Dict[int, float]]] = None,
     ):
         """
         Initialize MmapDataset.
@@ -73,10 +73,13 @@ class MmapDataset(torch.utils.data.Dataset):
                 None/"event_reconstruction" (default) and "starting_classification".
                 When set to "starting_classification" the dataset checks that the
                 event record contains a 'starting' field.
-            morphology_filter: If provided, restrict the dataset to events whose
-                true morphology is in the given list. IceCube codes:
-                0=cascade, 1=starting track, 2=throughgoing track,
-                3=stopping track, 4=uncontained, 5=bundle. IceCube-only.
+            morphology_filter: If provided, restrict the dataset by morphology.
+                List form (e.g. [1, 2, 3]) keeps all events of the listed classes.
+                Dict form (e.g. {1: 1.0, 2: 1.0, 3: 1.0, 4: 0.1}) keeps the given
+                fraction of each class, subsampled deterministically using
+                split_seed. IceCube codes: 0=cascade, 1=starting track,
+                2=throughgoing track, 3=stopping track, 4=uncontained, 5=bundle.
+                IceCube-only.
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
@@ -118,13 +121,25 @@ class MmapDataset(torch.utils.data.Dataset):
         if morphology_filter is not None:
             if self.dataset_type != 'icecube':
                 raise ValueError("morphology_filter is only supported for IceCube datasets")
-            allowed = np.asarray(list(morphology_filter), dtype=np.int64)
+            if isinstance(morphology_filter, dict):
+                keep_fracs = {int(k): float(v) for k, v in morphology_filter.items()}
+            else:
+                keep_fracs = {int(k): 1.0 for k in morphology_filter}
             morph = np.concatenate([
                 np.asarray(events['morphology'], dtype=np.int64)
                 for events, _ in self.datasets
             ])
-            valid_pool = np.where(np.isin(morph, allowed))[0]
-            print(f"Morphology filter {allowed.tolist()}: kept {len(valid_pool):,} / {self.total_events:,} events")
+            filt_rng = np.random.RandomState(split_seed)
+            pools = []
+            for cls, frac in keep_fracs.items():
+                idx = np.where(morph == cls)[0]
+                if frac < 1.0:
+                    n = int(round(len(idx) * frac))
+                    idx = filt_rng.choice(idx, size=n, replace=False)
+                pools.append(idx)
+                print(f"  morph {cls}: kept {len(idx):,} (frac={frac})")
+            valid_pool = np.sort(np.concatenate(pools)) if pools else np.array([], dtype=np.int64)
+            print(f"Morphology filter: kept {len(valid_pool):,} / {self.total_events:,} events")
 
         # Handle train/val splitting (over the filtered pool, if any)
         if split in ["train", "val"]:
