@@ -242,11 +242,6 @@ class MmapDataset(torch.utils.data.Dataset):
         dir_y = np.sin(initial_zenith) * np.sin(initial_azimuth)
         dir_z = np.cos(initial_zenith)
 
-        # True vertex position (meters)
-        vertex_x = event_record['initial_x']
-        vertex_y = event_record['initial_y']
-        vertex_z = event_record['initial_z']
-
         starting_available = 'starting' in event_record.dtype.names
         if not starting_available and self.task == 'starting_classification':
             raise KeyError("Event record does not contain 'starting'; cannot build starting_classification labels.")
@@ -255,9 +250,19 @@ class MmapDataset(torch.utils.data.Dataset):
         starting_flag = 1.0 if starting_flag >= 0.5 else 0.0
 
         if self.dataset_type == 'prometheus':
+            # Prometheus has no vertex_* field; events are simulated near the
+            # detector so initial_* IS the interaction point.
+            vertex_x = event_record['initial_x']
+            vertex_y = event_record['initial_y']
+            vertex_z = event_record['initial_z']
             pid = event_record['initial_type']
             labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
         else:
+            # IceCube: vertex_x/y/z is the precomputed interaction point (starting)
+            # or track entry point (throughgoing). NaN for uncontained/bundle.
+            vertex_x = event_record['vertex_x']
+            vertex_y = event_record['vertex_y']
+            vertex_z = event_record['vertex_z']
             # 0: cascade, 1: starting track, 2: throughgoing track, 3: stopping track, 4: uncontained, 5: bundle
             morphology = event_record['morphology']
             labels = np.array([log_energy, dir_x, dir_y, dir_z, morphology, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
