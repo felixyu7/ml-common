@@ -13,29 +13,72 @@ except ImportError:
 
 from ..utils.io import load_ntmmap
 
+# Detector geometry center (meters), per dataset type. Vertex targets are
+# expressed relative to this point and converted to km, so the network
+# regresses an O(1) offset from the detector center.
+VERTEX_CENTER_M = {
+    'prometheus': (0.0, 0.0, -1942.0),  # icgeo instrumented-volume center
+    'icecube': (0.0, 0.0, 0.0),         # IceCube detector frame is ~centered
+}
+
+
+def _charge_weighted_median(times: np.ndarray, charges: np.ndarray) -> float:
+    """Charge-weighted median pulse time — a robust per-event time reference.
+
+    Replaces the event-minimum reference. The minimum is an extreme-value
+    statistic set by the single earliest (often scattered/noise) hit, which sits
+    ~1 us differently in data vs. MC and shifts the absolute first-hit-time
+    feature/coordinate the network consumes. The inter-DOM timing structure that
+    actually encodes direction is invariant to the per-event reference, so
+    centering on a robust (charge-weighted median) time makes the absolute time
+    feature data-MC consistent without changing the directional signal.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    if times.size == 0:
+        return 0.0
+    charges = np.asarray(charges, dtype=np.float64)
+    order = np.argsort(times, kind='mergesort')
+    ts = times[order]
+    cw = np.cumsum(charges[order])
+    total = cw[-1]
+    if total <= 0:                      # degenerate weights -> plain median
+        return float(ts[ts.size // 2])
+    return float(ts[np.searchsorted(cw, 0.5 * total)])
+
 
 def _normalize_summary_stats(sensor_stats: np.ndarray, extended: bool) -> np.ndarray:
     """Per-feature normalization for summary statistics.
 
+    first_hit_time (col 3) is now signed — it is relative to the per-event
+    charge-weighted-median reference (see _charge_weighted_median / __getitem__) —
+    so it uses a sign-preserving log. Charges and Δt features are non-negative, so
+    signed-log reduces to log1p for them.
+
     For the 25 extended features:
       - Absolute time percentiles (indices 4-7, 9-14) are converted to
-        deltas relative to first_hit_time before log1p.
+        deltas relative to first_hit_time (reference-invariant, non-negative).
+      - first_hit_time (3) uses sign-preserving log.
       - q_max_frac (22) and t_skewness (24) use identity (no transform).
       - All other features use log1p.
     """
     stats = sensor_stats.astype(np.float32)
     if not extended:
-        return np.log1p(stats)
+        # signed-log: log1p for non-negative cols (charges), sign-preserving for
+        # the signed time cols (3-7).
+        return np.sign(stats) * np.log1p(np.abs(stats))
 
-    # Convert absolute time percentiles to Δt from first_hit_time
+    # Convert absolute time percentiles to Δt from first_hit_time (the per-event
+    # reference cancels, so these deltas are unchanged and stay non-negative).
     first_t = stats[:, 3:4]  # [N, 1]
     dt_idx = [4, 5, 6, 7, 9, 10, 11, 12, 13, 14]
     stats[:, dt_idx] = np.maximum(stats[:, dt_idx] - first_t, 0.0)
 
-    # log1p for most features; identity for q_max_frac (22) and t_skewness (24)
-    log1p_idx = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,23]
+    # log1p for non-negative features; sign-preserving log for the signed
+    # first_hit_time (3); identity for q_max_frac (22) and t_skewness (24).
+    log1p_idx = [0,1,2,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,23]
     feats = np.empty_like(stats)
     feats[:, log1p_idx] = np.log1p(stats[:, log1p_idx])
+    feats[:, 3] = np.sign(stats[:, 3]) * np.log1p(np.abs(stats[:, 3]))
     feats[:, 22] = stats[:, 22]
     feats[:, 24] = stats[:, 24]
     return feats
@@ -170,7 +213,8 @@ class MmapDataset(torch.utils.data.Dataset):
             coords: [N, 4] (x, y, z, t)
             features: [N, F]
             labels: [log_energy, dir_x, dir_y, dir_z, pid, starting_flag, vertex_x, vertex_y, vertex_z]
-                    vertex coordinates are in meters
+                    vertex coordinates are detector-centered and in km
+                    (see VERTEX_CENTER_M)
         """
         # Map split index to global index
         global_idx = self.indices[idx] if self.indices is not None else idx
@@ -191,8 +235,10 @@ class MmapDataset(torch.utils.data.Dataset):
 
         photons = photons_array[start_idx:end_idx].copy()
         
-        # subtract minimum photon hit time so event starts at t=0
-        photons['t'] -= photons['t'].min()
+        # center times on the charge-weighted median (robust per-event reference,
+        # data-MC consistent) instead of the unstable event minimum. Times become
+        # signed (early hits negative); inter-DOM structure is unchanged.
+        photons['t'] -= _charge_weighted_median(photons['t'], photons['charge'])
 
         # Process photons
         if self.use_summary_stats and len(photons) > 0:
@@ -213,7 +259,8 @@ class MmapDataset(torch.utils.data.Dataset):
                 photons_dict, extended=self.extended_stats
             )
 
-            # 4D coords: x, y, z, first_hit_time
+            # 4D coords: x, y, z, first_hit_time (signed, relative to the
+            # per-event charge-weighted-median reference)
             pos = np.column_stack([
                 sensor_positions[:, 0],
                 sensor_positions[:, 1],
@@ -250,13 +297,12 @@ class MmapDataset(torch.utils.data.Dataset):
         starting_flag = 1.0 if starting_flag >= 0.5 else 0.0
 
         if self.dataset_type == 'prometheus':
-            # Prometheus has no vertex_* field; events are simulated near the
-            # detector so initial_* IS the interaction point.
-            vertex_x = event_record['initial_x']
-            vertex_y = event_record['initial_y']
-            vertex_z = event_record['initial_z']
-            pid = event_record['initial_type']
-            labels = np.array([log_energy, dir_x, dir_y, dir_z, pid, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
+            # Use the interaction vertex (vertex_*), not the neutrino generation
+            # point (initial_*), which can be hundreds of km from the detector.
+            vertex_x = event_record['vertex_x']
+            vertex_y = event_record['vertex_y']
+            vertex_z = event_record['vertex_z']
+            class_field = event_record['initial_type']  # pid
         else:
             # IceCube: vertex_x/y/z is the precomputed interaction point (starting)
             # or track entry point (throughgoing). NaN for uncontained/bundle.
@@ -264,8 +310,16 @@ class MmapDataset(torch.utils.data.Dataset):
             vertex_y = event_record['vertex_y']
             vertex_z = event_record['vertex_z']
             # 0: cascade, 1: starting track, 2: throughgoing track, 3: stopping track, 4: uncontained, 5: bundle
-            morphology = event_record['morphology']
-            labels = np.array([log_energy, dir_x, dir_y, dir_z, morphology, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
+            class_field = event_record['morphology']
+
+        # Vertex target: detector-centered and converted to km, matching the
+        # km input coordinate frame used for `pos`.
+        cx, cy, cz = VERTEX_CENTER_M[self.dataset_type]
+        vertex_x = (vertex_x - cx) / 1000.0
+        vertex_y = (vertex_y - cy) / 1000.0
+        vertex_z = (vertex_z - cz) / 1000.0
+
+        labels = np.array([log_energy, dir_x, dir_y, dir_z, class_field, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
 
         return pos, feats, labels
 
