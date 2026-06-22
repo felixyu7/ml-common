@@ -76,6 +76,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
 
             # Common options
             use_summary_stats: true
+            summary_stats_mode: extended  # 'minimal'(4)/'standard'(9)/'extended'(25);
+                                          # falls back to extended_stats bool if unset
             batch_size: 256  # or in training_options
             num_workers: 8   # or in training_options
 
@@ -85,6 +87,9 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     dataloader_type = cfg['dataloader']
     task = cfg.get('task') or data_options.get('task')
     extended_stats = data_options.get('extended_stats', False)
+    # nt-summary-stats mode: 'minimal'/'standard'/'extended'. Takes precedence
+    # over the legacy extended_stats bool; None falls back to it in the datasets.
+    summary_stats_mode = data_options.get('summary_stats_mode')
     morphology_filter = data_options.get('morphology_filter')
 
     if dataloader_type == 'i3':
@@ -145,6 +150,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 min_cascade_energy=min_cascade_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
+                summary_stats_mode=summary_stats_mode,
             )
 
             valid_dataset = ParquetDataset(
@@ -158,6 +164,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 min_cascade_energy=min_cascade_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
+                summary_stats_mode=summary_stats_mode,
             )
         else:
             # Separate train/valid paths
@@ -169,6 +176,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 min_cascade_energy=min_cascade_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
+                summary_stats_mode=summary_stats_mode,
             )
 
             valid_dataset = ParquetDataset(
@@ -179,6 +187,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 min_cascade_energy=min_cascade_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
+                summary_stats_mode=summary_stats_mode,
             )
 
         train_sampler = _make_train_sampler(train_dataset, data_options)
@@ -193,10 +202,10 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         use_summary_stats = data_options.get('use_summary_stats', True)
 
         # Create stratified train/val datasets for each class
-        train_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
-        train_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
-        val_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
-        val_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter)
+        train_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
+        train_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
+        val_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
+        val_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
 
         train_dataset = BinaryLabelDataset(train_ds_0, train_ds_1)
         valid_dataset = BinaryLabelDataset(val_ds_0, val_ds_1)
@@ -221,6 +230,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 split_seed=split_seed,
                 task=task,
                 extended_stats=extended_stats,
+                summary_stats_mode=summary_stats_mode,
                 morphology_filter=morphology_filter,
             )
 
@@ -232,6 +242,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 split_seed=split_seed,
                 task=task,
                 extended_stats=extended_stats,
+                summary_stats_mode=summary_stats_mode,
                 morphology_filter=morphology_filter,
             )
 
@@ -271,6 +282,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                     use_summary_stats=data_options.get('use_summary_stats', True),
                     task=task,
                     extended_stats=extended_stats,
+                    summary_stats_mode=summary_stats_mode,
                     morphology_filter=morphology_filter,
                 )
 
@@ -279,6 +291,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                     use_summary_stats=data_options.get('use_summary_stats', True),
                     task=task,
                     extended_stats=extended_stats,
+                    summary_stats_mode=summary_stats_mode,
                     morphology_filter=morphology_filter,
                 )
 

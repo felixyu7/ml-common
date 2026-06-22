@@ -13,6 +13,37 @@ except ImportError:
 
 from ..utils.io import load_ntmmap
 
+# nt-summary-stats modes and the per-DOM feature count each produces. Selected
+# via the ``mode`` argument of nt_summary_stats (v1.2+): 'minimal' (4),
+# 'standard' (9, default), or 'extended' (25).
+SUMMARY_STATS_N_FEATURES = {"minimal": 4, "standard": 9, "extended": 25}
+
+# Column index of "time of first pulse" within the summary-stats vector, per
+# mode. In 'minimal' the layout is [total_charge, first_hit_time, cw_mean_time,
+# cw_std_time] so first_hit_time is column 1; in 'standard'/'extended' it is
+# column 3.
+SUMMARY_STATS_FIRST_HIT_TIME_COL = {"minimal": 1, "standard": 3, "extended": 3}
+
+
+def _resolve_summary_stats_mode(
+    summary_stats_mode: Optional[str] = None, extended_stats: bool = False
+) -> str:
+    """Resolve the nt-summary-stats mode string.
+
+    ``summary_stats_mode`` (one of 'minimal'/'standard'/'extended') takes
+    precedence. When it is None, fall back to the legacy ``extended_stats`` bool
+    (True -> 'extended', False -> 'standard') for backward compatibility.
+    """
+    if summary_stats_mode is None:
+        summary_stats_mode = "extended" if extended_stats else "standard"
+    if summary_stats_mode not in SUMMARY_STATS_N_FEATURES:
+        valid = ", ".join(repr(m) for m in SUMMARY_STATS_N_FEATURES)
+        raise ValueError(
+            f"Invalid summary_stats_mode {summary_stats_mode!r}; expected one of {valid}."
+        )
+    return summary_stats_mode
+
+
 # Detector geometry center (meters), per dataset type. Vertex targets are
 # expressed relative to this point and converted to km, so the network
 # regresses an O(1) offset from the detector center.
@@ -46,13 +77,18 @@ def _charge_weighted_median(times: np.ndarray, charges: np.ndarray) -> float:
     return float(ts[np.searchsorted(cw, 0.5 * total)])
 
 
-def _normalize_summary_stats(sensor_stats: np.ndarray, extended: bool) -> np.ndarray:
+def _normalize_summary_stats(sensor_stats: np.ndarray, mode: str) -> np.ndarray:
     """Per-feature normalization for summary statistics.
 
-    first_hit_time (col 3) is now signed — it is relative to the per-event
+    ``mode`` is one of 'minimal' (4), 'standard' (9), or 'extended' (25).
+
+    first_hit_time is now signed — it is relative to the per-event
     charge-weighted-median reference (see _charge_weighted_median / __getitem__) —
     so it uses a sign-preserving log. Charges and Δt features are non-negative, so
-    signed-log reduces to log1p for them.
+    signed-log reduces to log1p for them. For 'minimal' and 'standard' every
+    column is handled by the same sign-preserving log (the only signed columns —
+    first_hit_time, and in 'minimal' the charge-weighted mean time — are covered,
+    and it reduces to log1p on the non-negative columns).
 
     For the 25 extended features:
       - Absolute time percentiles (indices 4-7, 9-14) are converted to
@@ -62,9 +98,9 @@ def _normalize_summary_stats(sensor_stats: np.ndarray, extended: bool) -> np.nda
       - All other features use log1p.
     """
     stats = sensor_stats.astype(np.float32)
-    if not extended:
+    if mode != "extended":
         # signed-log: log1p for non-negative cols (charges), sign-preserving for
-        # the signed time cols (3-7).
+        # the signed time cols.
         return np.sign(stats) * np.log1p(np.abs(stats))
 
     # Convert absolute time percentiles to Δt from first_hit_time (the per-event
@@ -102,6 +138,7 @@ class MmapDataset(torch.utils.data.Dataset):
         task: Optional[str] = None,
         extended_stats: bool = False,
         morphology_filter: Optional[Union[List[int], Dict[int, float]]] = None,
+        summary_stats_mode: Optional[str] = None,
     ):
         """
         Initialize MmapDataset.
@@ -123,11 +160,14 @@ class MmapDataset(torch.utils.data.Dataset):
                 split_seed. IceCube codes: 0=cascade, 1=starting track,
                 2=throughgoing track, 3=stopping track, 4=uncontained, 5=bundle.
                 IceCube-only.
+            summary_stats_mode: nt-summary-stats mode, one of 'minimal' (4),
+                'standard' (9), or 'extended' (25). When None (default), falls
+                back to the legacy ``extended_stats`` bool.
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
-        self.extended_stats = extended_stats
+        self.summary_stats_mode = _resolve_summary_stats_mode(summary_stats_mode, extended_stats)
 
         if isinstance(mmap_paths, str):
             mmap_paths = [mmap_paths]
@@ -256,19 +296,20 @@ class MmapDataset(torch.utils.data.Dataset):
                 photons_dict['id_idx'] = photons['id_idx']
 
             sensor_positions, sensor_stats = nt_summary_stats.process_event(
-                photons_dict, extended=self.extended_stats
+                photons_dict, mode=self.summary_stats_mode
             )
 
             # 4D coords: x, y, z, first_hit_time (signed, relative to the
             # per-event charge-weighted-median reference)
+            first_t_col = SUMMARY_STATS_FIRST_HIT_TIME_COL[self.summary_stats_mode]
             pos = np.column_stack([
                 sensor_positions[:, 0],
                 sensor_positions[:, 1],
                 sensor_positions[:, 2],
-                sensor_stats[:, 3]  # first hit time
+                sensor_stats[:, first_t_col]  # first hit time
             ]).astype(np.float32) / 1000.  # convert to km/microseconds
 
-            feats = _normalize_summary_stats(sensor_stats, self.extended_stats)
+            feats = _normalize_summary_stats(sensor_stats, self.summary_stats_mode)
         else:
             # Pulse-level: use time, charge, and DOM identifiers as features
             pos = np.column_stack([photons['x'], photons['y'], photons['z'], photons['t']]) / 1000.

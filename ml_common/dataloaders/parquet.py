@@ -19,7 +19,11 @@ except ImportError:
     nt_summary_stats = None
     HAS_SUMMARY_STATS = False
 
-from .mmap import _normalize_summary_stats
+from .mmap import (
+    _normalize_summary_stats,
+    _resolve_summary_stats_mode,
+    SUMMARY_STATS_FIRST_HIT_TIME_COL,
+)
 
 
 # Stochastic loss types from prometheus (exclude type 1 = delta ray/ionization)
@@ -57,6 +61,7 @@ class ParquetDataset(torch.utils.data.Dataset):
         min_stochastic_energy: float = 0.5,
         cache_size: int = 20,
         extended_stats: bool = False,
+        summary_stats_mode: Optional[str] = None,
     ):
         """
         Initialize ParquetDataset.
@@ -71,6 +76,9 @@ class ParquetDataset(torch.utils.data.Dataset):
             max_stochastic: Maximum number of stochastic losses to keep per event
             min_stochastic_energy: Minimum stochastic loss energy threshold in GeV
             cache_size: Number of parquet files to keep in LRU cache
+            summary_stats_mode: nt-summary-stats mode, one of 'minimal' (4),
+                'standard' (9), or 'extended' (25). When None (default), falls
+                back to the legacy ``extended_stats`` bool.
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError(
@@ -78,7 +86,7 @@ class ParquetDataset(torch.utils.data.Dataset):
                 "Please do 'pip install nt-summary-stats'."
             )
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
-        self.extended_stats = extended_stats
+        self.summary_stats_mode = _resolve_summary_stats_mode(summary_stats_mode, extended_stats)
         self.max_stochastic = max_stochastic
         self.min_stochastic_energy = min_stochastic_energy
         self.cache_size = cache_size
@@ -211,18 +219,19 @@ class ParquetDataset(torch.utils.data.Dataset):
                 photons_dict['id_idx'] = np.array(photons['id_idx'])
 
             sensor_positions, sensor_stats = nt_summary_stats.process_event(
-                photons_dict, extended=self.extended_stats
+                photons_dict, mode=self.summary_stats_mode
             )
 
             # 4D coords: x, y, z, first_hit_time (in km/microseconds)
+            first_t_col = SUMMARY_STATS_FIRST_HIT_TIME_COL[self.summary_stats_mode]
             pos = np.column_stack([
                 sensor_positions[:, 0],
                 sensor_positions[:, 1],
                 sensor_positions[:, 2],
-                sensor_stats[:, 3]  # first hit time
+                sensor_stats[:, first_t_col]  # first hit time
             ]).astype(np.float32) / 1000.  # convert m/ns to km/us
 
-            feats = _normalize_summary_stats(sensor_stats, self.extended_stats)
+            feats = _normalize_summary_stats(sensor_stats, self.summary_stats_mode)
         else:
             # Pulse-level (no aggregation)
             # Features: [placeholder, log(charge+1), string_id, sensor_id] to match MmapDataset format
