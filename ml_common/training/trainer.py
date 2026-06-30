@@ -1,6 +1,7 @@
 """Generic trainer class for PyTorch models."""
 
 import csv
+import math
 import time
 import torch
 import numpy as np
@@ -58,8 +59,15 @@ class Trainer:
         self.save_epochs = training_opts.get('save_epochs', 5)
         self.grad_clip = training_opts.get('grad_clip', 1.0)
 
-        # Setup optimizer, scheduler, mixed precision, and logging
-        self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler(training_opts)
+        # Setup optimizer, mixed precision, and logging. The LR scheduler is built
+        # in fit() once steps-per-epoch is known, since it steps per optimizer step.
+        self.optimizer = self._setup_optimizer(training_opts)
+        self.scheduler = None
+        self._pending_scheduler_state = None
+        self.warmup_steps_cfg = training_opts.get('warmup_steps', None)
+        self.warmup_ratio = training_opts.get('warmup_ratio', 0.05)
+        self.min_lr_ratio = training_opts.get('min_lr_ratio', 0.0)
+        self.steps_per_epoch_cfg = training_opts.get('steps_per_epoch', None)
         self.scaler = self._setup_mixed_precision()
         self._setup_logging()
 
@@ -91,30 +99,50 @@ class Trainer:
                 f"Invalid precision '{precision}'. Must be one of: 'fp16', 'bf16', 'fp32'"
             )
 
-    def _setup_optimizer_and_scheduler(self, training_opts: Dict[str, Any]) -> Tuple:
-        """Setup optimizer and learning rate scheduler with optional linear warmup."""
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
-        T_max = training_opts.get('T_max', self.epochs)
-        warmup_epochs = training_opts.get(
-            'warmup_epochs', max(1, round(self.epochs * 0.05)) if self.epochs >= 10 else 0
-        )
+    def _setup_optimizer(self, training_opts: Dict[str, Any]) -> torch.optim.Optimizer:
+        """AdamW with decoupled weight decay: 2D+ params (matrices, embeddings) are
+        decayed; 1D params (RMSNorm gains, biases, LayerScale) are not — the
+        standard transformer convention, which avoids shrinking normalization
+        gains and bias terms."""
+        decay, no_decay = [], []
+        for _name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (decay if p.ndim >= 2 else no_decay).append(p)
+        param_groups = [
+            {'params': decay, 'weight_decay': self.weight_decay},
+            {'params': no_decay, 'weight_decay': 0.0},
+        ]
+        return torch.optim.AdamW(param_groups, lr=self.lr)
 
-        if warmup_epochs > 0:
-            warmup = torch.optim.lr_scheduler.LinearLR(
-                optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_epochs
-            )
-            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=max(1, T_max - warmup_epochs)
-            )
-            scheduler = torch.optim.lr_scheduler.SequentialLR(
-                optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs]
-            )
+    def _build_scheduler(self, steps_per_epoch: int) -> torch.optim.lr_scheduler.LambdaLR:
+        """Per-step linear-warmup + cosine-decay schedule over the whole run.
+
+        Stepped once per optimizer step (not per epoch), so warmup ramps smoothly
+        over many steps and cosine is a continuous curve — the industry-standard
+        form (cf. HF get_cosine_schedule_with_warmup). Warmup length is
+        ``warmup_steps`` if set, else ``warmup_ratio`` of total steps; cosine
+        decays from the peak LR down to ``min_lr_ratio * peak`` (default 0)."""
+        total_steps = max(1, self.epochs * steps_per_epoch)
+        if self.warmup_steps_cfg is not None:
+            warmup_steps = int(self.warmup_steps_cfg)
         else:
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max)
+            warmup_steps = int(self.warmup_ratio * total_steps)
+        warmup_steps = max(0, min(warmup_steps, total_steps - 1))
+        min_ratio = self.min_lr_ratio
 
-        return optimizer, scheduler
+        def lr_lambda(step: int) -> float:
+            if warmup_steps > 0 and step < warmup_steps:
+                return float(step) / float(warmup_steps)
+            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+            return min_ratio + (1.0 - min_ratio) * cosine
+
+        print(
+            f"LR schedule: {warmup_steps}/{total_steps} warmup steps "
+            f"(ratio {warmup_steps / total_steps:.3f}), cosine to {min_ratio:g}*peak"
+        )
+        return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
     def _setup_mixed_precision(self) -> Optional[torch.amp.GradScaler]:
         """Setup mixed precision training."""
@@ -245,6 +273,9 @@ class Trainer:
                 if self.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
+
+            # Per-step LR schedule update (after the optimizer step)
+            self.scheduler.step()
 
             loss_value = loss.item()  # single host sync; reused below
             running_loss += loss_value
@@ -411,7 +442,9 @@ class Trainer:
 
         if resume_training:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            # Scheduler is built in fit() once steps-per-epoch is known; stash its
+            # state there and apply it after construction.
+            self._pending_scheduler_state = checkpoint.get('scheduler_state_dict')
             self.current_epoch = checkpoint['epoch']
 
             if self.scaler is not None and 'scaler_state_dict' in checkpoint:
@@ -421,6 +454,21 @@ class Trainer:
         """Train model."""
         print(f"Starting training for {self.epochs} epochs...")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+
+        # Build the per-step LR scheduler now that steps-per-epoch is known.
+        try:
+            steps_per_epoch = len(train_loader)
+        except TypeError:
+            steps_per_epoch = self.steps_per_epoch_cfg
+            if steps_per_epoch is None:
+                raise ValueError(
+                    "train_loader has no length; set training_options.steps_per_epoch "
+                    "so the LR scheduler knows the total step count."
+                )
+        self.scheduler = self._build_scheduler(steps_per_epoch)
+        if self._pending_scheduler_state is not None:
+            self.scheduler.load_state_dict(self._pending_scheduler_state)
+            self._pending_scheduler_state = None
 
         epoch_pbar = tqdm(
             range(self.current_epoch, self.epochs),
@@ -433,7 +481,6 @@ class Trainer:
             self.current_epoch = epoch
             train_metrics = self.train_epoch(train_loader)
             val_metrics = self.validate(val_loader)
-            self.scheduler.step()
 
             epoch_metrics = {**train_metrics, **val_metrics}
             self.log_metrics(epoch_metrics)
