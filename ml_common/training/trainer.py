@@ -219,7 +219,9 @@ class Trainer:
         )
 
         for batch_idx, (coords, features, labels) in enumerate(pbar):
-            coords, features, labels = coords.to(self.device), features.to(self.device), labels.to(self.device)
+            coords = coords.to(self.device, non_blocking=True)
+            features = features.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
             coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
             batches_seen += 1
 
@@ -244,16 +246,17 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
 
-            running_loss += loss.item()
+            loss_value = loss.item()  # single host sync; reused below
+            running_loss += loss_value
             pbar.set_postfix({
-                'Loss': f'{loss.item():.6f}',
+                'Loss': f'{loss_value:.6f}',
                 'LR': f'{self.scheduler.get_last_lr()[0]:.2e}',
                 'Avg': f'{running_loss/(batch_idx+1):.6f}'
             })
 
             if self.current_step % 50 == 0:
                 metrics = {
-                    'train_loss': loss.item(),
+                    'train_loss': loss_value,
                     'learning_rate': self.scheduler.get_last_lr()[0]
                 }
                 if self.use_wandb and hasattr(self.loss_fn, 'current_weights'):
@@ -314,7 +317,9 @@ class Trainer:
                 position=2,
             )
             for coords, features, labels in val_pbar:
-                coords, features, labels = coords.to(self.device), features.to(self.device), labels.to(self.device)
+                coords = coords.to(self.device, non_blocking=True)
+                features = features.to(self.device, non_blocking=True)
+                labels = labels.to(self.device, non_blocking=True)
                 coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
 
                 with self._get_autocast_context():
