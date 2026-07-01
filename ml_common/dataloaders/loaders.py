@@ -2,7 +2,7 @@
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from typing import Dict, Any, Tuple
 
 from .mmap import MmapDataset
@@ -191,7 +191,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
             )
 
         train_sampler = _make_train_sampler(train_dataset, data_options)
-        val_sampler = RandomSampler(valid_dataset)
+        val_sampler = SequentialSampler(valid_dataset)
 
     elif 'data_path_0' in data_options and 'data_path_1' in data_options:
         # Binary classification with two dataset groups
@@ -211,7 +211,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         valid_dataset = BinaryLabelDataset(val_ds_0, val_ds_1)
 
         train_sampler = _make_train_sampler(train_dataset, data_options)
-        val_sampler = RandomSampler(valid_dataset)
+        val_sampler = SequentialSampler(valid_dataset)
 
     else:
         # Single path with runtime splitting
@@ -298,14 +298,14 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         train_len = len(train_dataset)
         if train_len == 0:
             train_sampler = None
-            val_sampler = RandomChunkSampler(valid_dataset, valid_dataset.chunks) if dataloader_type == 'kaggle' else RandomSampler(valid_dataset)
+            val_sampler = RandomChunkSampler(valid_dataset, valid_dataset.chunks) if dataloader_type == 'kaggle' else SequentialSampler(valid_dataset)
             print("Warning: Training split is empty")
         elif dataloader_type == 'kaggle':
             train_sampler = RandomChunkSampler(train_dataset, train_dataset.chunks)
             val_sampler = RandomChunkSampler(valid_dataset, valid_dataset.chunks)
         else:
             train_sampler = _make_train_sampler(train_dataset, data_options)
-            val_sampler = RandomSampler(valid_dataset)
+            val_sampler = SequentialSampler(valid_dataset)
 
     # Get batch size and num_workers
     batch_size = data_options.get('batch_size') or cfg['training_options']['batch_size']

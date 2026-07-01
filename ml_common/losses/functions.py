@@ -47,12 +47,19 @@ def angular_distance_loss(
 
 
 def gaussian_nll_loss(mu: Tensor, var: Tensor, target: Tensor) -> Tensor:
-    """Gaussian NLL loss for regression with uncertainty (var passed through softplus)."""
-    # Ensure var is positive and stable
-    var = F.softplus(var) + 1e-6
+    """Gaussian NLL loss for regression with uncertainty (var passed through softplus).
 
-    # NLL for each sample
-    nll = 0.5 * ((target - mu)**2 / var + torch.log(var))
+    Computed in fp32 outside any autocast region (same convention as the
+    directional NLLs): with var floored at 1e-6, bf16's 2^-8 relative precision
+    makes the (target-mu)^2/var term noisy once the network is confident.
+    """
+    with torch.autocast(device_type=mu.device.type, enabled=False):
+        mu, var, target = mu.float(), var.float(), target.float()
+        # Ensure var is positive and stable
+        var = F.softplus(var) + 1e-6
 
-    # Return average over batch
-    return torch.mean(nll)
+        # NLL for each sample
+        nll = 0.5 * ((target - mu)**2 / var + torch.log(var))
+
+        # Return average over batch
+        return torch.mean(nll)

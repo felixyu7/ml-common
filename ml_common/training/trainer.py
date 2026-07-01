@@ -113,7 +113,9 @@ class Trainer:
             {'params': decay, 'weight_decay': self.weight_decay},
             {'params': no_decay, 'weight_decay': 0.0},
         ]
-        return torch.optim.AdamW(param_groups, lr=self.lr)
+        # fused: single multi-tensor kernel on CUDA (~1-2 ms/step at 8-layer scale)
+        return torch.optim.AdamW(param_groups, lr=self.lr,
+                                 fused=(self.device.type == 'cuda'))
 
     def _build_scheduler(self, steps_per_epoch: int) -> torch.optim.lr_scheduler.LambdaLR:
         """Per-step linear-warmup + cosine-decay schedule over the whole run.
@@ -277,17 +279,18 @@ class Trainer:
             # Per-step LR schedule update (after the optimizer step)
             self.scheduler.step()
 
-            loss_value = loss.item()  # single host sync; reused below
-            running_loss += loss_value
-            pbar.set_postfix({
-                'Loss': f'{loss_value:.6f}',
-                'LR': f'{self.scheduler.get_last_lr()[0]:.2e}',
-                'Avg': f'{running_loss/(batch_idx+1):.6f}'
-            })
-
+            # Accumulate on-device; loss.item() would sync the stream every
+            # step, so the host only reads it back on the logging cadences.
+            running_loss = running_loss + loss.detach()
+            if self.current_step % 20 == 0:
+                pbar.set_postfix({
+                    'Loss': f'{loss.item():.6f}',
+                    'LR': f'{self.scheduler.get_last_lr()[0]:.2e}',
+                    'Avg': f'{float(running_loss)/(batch_idx+1):.6f}'
+                })
             if self.current_step % 50 == 0:
                 metrics = {
-                    'train_loss': loss_value,
+                    'train_loss': loss.item(),
                     'learning_rate': self.scheduler.get_last_lr()[0]
                 }
                 if self.use_wandb and hasattr(self.loss_fn, 'current_weights'):
@@ -296,7 +299,7 @@ class Trainer:
                 self.log_metrics(metrics, step=self.current_step)
             self.current_step += 1
 
-        avg_loss = running_loss / max(1, batches_seen)
+        avg_loss = float(running_loss) / max(1, batches_seen)
         return {'train_loss': avg_loss}
 
     def _print_profiling_results(self, forward_times: list, total_time: float):
@@ -363,10 +366,13 @@ class Trainer:
                         forward_times.append(time.time() - t0)
 
                     loss = self.loss_fn(preds, labels)
-                total_loss += loss.item()
-                all_preds.append(preds.cpu())
-                all_labels.append(labels.cpu())
-                val_pbar.set_postfix({'Val Loss': f'{loss.item():.6f}'})
+                loss_value = loss.item()
+                total_loss += loss_value
+                # fp32 accumulation: the best-checkpoint metric is computed from
+                # these, and bf16 autocast outputs would quantize it (~0.4%).
+                all_preds.append(preds.float().cpu())
+                all_labels.append(labels.float().cpu())
+                val_pbar.set_postfix({'Val Loss': f'{loss_value:.6f}'})
 
         if profile:
             self._print_profiling_results(forward_times, time.time() - start_time)
@@ -399,6 +405,8 @@ class Trainer:
         """Save model checkpoint."""
         checkpoint = {
             'epoch': self.current_epoch,
+            'step': self.current_step,
+            'best_metric_value': self.best_metric_value,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
@@ -445,7 +453,13 @@ class Trainer:
             # Scheduler is built in fit() once steps-per-epoch is known; stash its
             # state there and apply it after construction.
             self._pending_scheduler_state = checkpoint.get('scheduler_state_dict')
-            self.current_epoch = checkpoint['epoch']
+            # The checkpoint's epoch is the just-FINISHED one: resume at the
+            # next, and restore step/best so wandb steps stay monotonic and
+            # best-checkpoint.pt can't be overwritten by a worse epoch.
+            self.current_epoch = checkpoint['epoch'] + 1
+            self.current_step = checkpoint.get('step', 0)
+            if 'best_metric_value' in checkpoint:
+                self.best_metric_value = checkpoint['best_metric_value']
 
             if self.scaler is not None and 'scaler_state_dict' in checkpoint:
                 self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -483,6 +497,9 @@ class Trainer:
             val_metrics = self.validate(val_loader)
 
             epoch_metrics = {**train_metrics, **val_metrics}
+            # Surface a silent compile/packed fallback (throughput downgrade).
+            epoch_metrics['encoder_compiled'] = float(
+                getattr(self.model, 'encoder_compiled', True))
             self.log_metrics(epoch_metrics)
 
             current_val = epoch_metrics.get(self.best_metric_key)
