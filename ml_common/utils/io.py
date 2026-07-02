@@ -41,7 +41,7 @@ def load_ntmmap(input_path: str) -> Tuple[np.memmap, np.memmap, np.dtype]:
         photon_dtype = pickle.loads(f.read(dtype_size))
         data_start = f.tell()
 
-    # Memory map photons as structured array (not raw bytes)
+    # Memory-map photons as a structured array
     photons_array = np.memmap(dat_path, dtype=photon_dtype, mode='r', offset=data_start)
 
     # Weighted sampling random-reads the photon store far beyond page-cache

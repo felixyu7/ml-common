@@ -46,17 +46,9 @@ class RandomChunkSampler(Sampler[int]):
         return self._num_samples
 
     def __iter__(self) -> Iterator[int]:
-        """
-        Generate sample indices in chunk-aware random order.
-
-        Strategy:
-        1. Randomize chunk order
-        2. For each chunk, shuffle events within that chunk
-        3. Yield all events from chunk before moving to next
-        """
+        """Generate sample indices: chunks in random order, events shuffled within each."""
         cumsum = np.cumsum(self.chunks)
 
-        # Setup generator
         if self.generator is None:
             seed = int(torch.empty((), dtype=torch.int64).random_().item())
             generator = torch.Generator()
@@ -64,18 +56,12 @@ class RandomChunkSampler(Sampler[int]):
         else:
             generator = self.generator
 
-        # Randomize chunk order
         chunk_list = torch.randperm(len(self.chunks), generator=generator).tolist()
 
-        # Process chunks in random order, events within chunks shuffled
         for chunk_idx in chunk_list:
             chunk_len = self.chunks[chunk_idx]
             offset = cumsum[chunk_idx - 1] if chunk_idx > 0 else 0
-
-            # Generate shuffled indices for this chunk
             chunk_indices = offset + torch.randperm(chunk_len, generator=generator)
-
-            # Yield all indices from this chunk
             yield from chunk_indices.tolist()
 
     def __len__(self) -> int:

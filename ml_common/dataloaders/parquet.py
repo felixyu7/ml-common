@@ -78,7 +78,7 @@ class ParquetDataset(torch.utils.data.Dataset):
             cache_size: Number of parquet files to keep in LRU cache
             summary_stats_mode: nt-summary-stats mode, one of 'minimal' (4),
                 'standard' (9), or 'extended' (25). When None (default), falls
-                back to the legacy ``extended_stats`` bool.
+                back to the ``extended_stats`` bool.
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError(
@@ -161,9 +161,8 @@ class ParquetDataset(torch.utils.data.Dataset):
         return table
 
     def _get_row(self, file_idx: int, local_idx: int):
-        """Get a single row efficiently."""
+        """Get a single row efficiently (arrow take(), faster than pandas iloc)."""
         table = self._load_file(file_idx)
-        # Use take() for single-row access - much faster than pandas iloc
         row_table = table.take([local_idx])
         return row_table.to_pydict()
 
@@ -184,11 +183,7 @@ class ParquetDataset(torch.utils.data.Dataset):
         """
         # Map split index to global index
         global_idx = self.indices[idx] if self.indices is not None else idx
-
-        # Get file and local index
         file_idx, local_idx = self._get_file_and_local_idx(global_idx)
-
-        # Load row data
         row = self._get_row(file_idx, local_idx)
         mc = row['mc_truth'][0]  # [0] because pydict returns lists
         photons = row['photons'][0]
@@ -262,7 +257,7 @@ class ParquetDataset(torch.utils.data.Dataset):
         vertex_z = mc['initial_state_z']
 
         pid = mc['initial_state_type']
-        starting_flag = 1.0  # assume starting track for prometheus simulation
+        starting_flag = 1.0  # prometheus events are assumed starting
 
         # === Process Stochastic Losses ===
         loss_types = np.array(mc['loss_type'])
@@ -285,11 +280,10 @@ class ParquetDataset(torch.utils.data.Dataset):
 
         n_stochastic = len(stochastic_distances)
 
-        # Truncate to max_stochastic (keep highest energy stochastic losses)
+        # Truncate to max_stochastic: keep top-K by energy, re-sorted by
+        # position to maintain spatial ordering
         if n_stochastic > self.max_stochastic:
-            # Get indices of top-K by energy
             top_idx = np.argsort(stochastic_energies)[-self.max_stochastic:]
-            # Sort by distance to maintain spatial ordering
             top_idx = np.sort(top_idx)
             stochastic_distances = stochastic_distances[top_idx]
             stochastic_energies = stochastic_energies[top_idx]

@@ -27,7 +27,6 @@ def angular_distance_loss(
     reduction: str = "mean"
 ) -> Tensor:
     """Angular distance loss, normalized to [0, 1]."""
-    # Normalize pred and truth to unit vectors
     pred = F.normalize(pred, p=2, dim=1)
     truth = F.normalize(truth, p=2, dim=1)
 
@@ -57,9 +56,5 @@ def gaussian_nll_loss(mu: Tensor, var: Tensor, target: Tensor) -> Tensor:
         mu, var, target = mu.float(), var.float(), target.float()
         # Ensure var is positive and stable
         var = F.softplus(var) + 1e-6
-
-        # NLL for each sample
         nll = 0.5 * ((target - mu)**2 / var + torch.log(var))
-
-        # Return average over batch
         return torch.mean(nll)

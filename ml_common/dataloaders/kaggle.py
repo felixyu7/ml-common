@@ -1,4 +1,4 @@
-"""Legacy IceCube Kaggle dataset with separate batch/meta files."""
+"""IceCube Kaggle dataset with separate batch/meta files."""
 
 import os
 import glob
@@ -47,7 +47,7 @@ def get_icecube_file_names(
 
 class KaggleDataset(torch.utils.data.Dataset):
     """
-    Dataset for legacy IceCube Kaggle format with separate batch and meta files.
+    Dataset for the IceCube Kaggle format with separate batch and meta files.
 
     Uses OrderedDict caching for efficient file loading. Works with RandomChunkSampler
     for optimal I/O performance.

@@ -75,7 +75,7 @@ class Trainer:
         self.current_epoch = 0
         self.current_step = 0
 
-        # Best-checkpoint selection: defaults preserve prior val_loss-minimize behavior
+        # Best-checkpoint selection (default: minimize val_loss)
         self.best_metric_key = training_opts.get('best_metric_key', 'val_loss')
         self.best_metric_mode = training_opts.get('best_metric_mode', 'min')
         if self.best_metric_mode not in ('min', 'max'):
@@ -121,10 +121,10 @@ class Trainer:
         """Per-step linear-warmup + cosine-decay schedule over the whole run.
 
         Stepped once per optimizer step (not per epoch), so warmup ramps smoothly
-        over many steps and cosine is a continuous curve — the industry-standard
-        form (cf. HF get_cosine_schedule_with_warmup). Warmup length is
-        ``warmup_steps`` if set, else ``warmup_ratio`` of total steps; cosine
-        decays from the peak LR down to ``min_lr_ratio * peak`` (default 0)."""
+        and cosine is a continuous curve (cf. HF get_cosine_schedule_with_warmup).
+        Warmup length is ``warmup_steps`` if set, else ``warmup_ratio`` of total
+        steps; cosine decays from the peak LR to ``min_lr_ratio * peak``
+        (default 0)."""
         total_steps = max(1, self.epochs * steps_per_epoch)
         if self.warmup_steps_cfg is not None:
             warmup_steps = int(self.warmup_steps_cfg)

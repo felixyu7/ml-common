@@ -41,7 +41,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders from config.
 
-    Supports unified mmap format, legacy Kaggle format, and direct I3 streaming.
+    Supports mmap, parquet, and Kaggle formats plus direct I3 streaming.
     Auto-detects format and creates appropriate datasets.
 
     Args:
@@ -90,7 +90,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     task = cfg.get('task') or data_options.get('task')
     extended_stats = data_options.get('extended_stats', False)
     # nt-summary-stats mode: 'minimal'/'standard'/'extended'. Takes precedence
-    # over the legacy extended_stats bool; None falls back to it in the datasets.
+    # over the extended_stats bool; None falls back to it in the datasets.
     summary_stats_mode = data_options.get('summary_stats_mode')
     morphology_filter = data_options.get('morphology_filter')
 

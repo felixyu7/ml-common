@@ -31,8 +31,8 @@ def _resolve_summary_stats_mode(
     """Resolve the nt-summary-stats mode string.
 
     ``summary_stats_mode`` (one of 'minimal'/'standard'/'extended') takes
-    precedence. When it is None, fall back to the legacy ``extended_stats`` bool
-    (True -> 'extended', False -> 'standard') for backward compatibility.
+    precedence; when None, fall back to the ``extended_stats`` bool
+    (True -> 'extended', False -> 'standard').
     """
     if summary_stats_mode is None:
         summary_stats_mode = "extended" if extended_stats else "standard"
@@ -56,13 +56,11 @@ VERTEX_CENTER_M = {
 def _charge_weighted_median(times: np.ndarray, charges: np.ndarray) -> float:
     """Charge-weighted median pulse time — a robust per-event time reference.
 
-    Replaces the event-minimum reference. The minimum is an extreme-value
-    statistic set by the single earliest (often scattered/noise) hit, which sits
-    ~1 us differently in data vs. MC and shifts the absolute first-hit-time
-    feature/coordinate the network consumes. The inter-DOM timing structure that
-    actually encodes direction is invariant to the per-event reference, so
-    centering on a robust (charge-weighted median) time makes the absolute time
-    feature data-MC consistent without changing the directional signal.
+    Preferred over the event minimum, an extreme-value statistic set by the
+    single earliest (often scattered/noise) hit that sits ~1 us differently in
+    data vs. MC. The inter-DOM timing structure that encodes direction is
+    invariant to the per-event reference, so a robust reference makes the
+    absolute time feature data-MC consistent without changing the signal.
     """
     times = np.asarray(times, dtype=np.float64)
     if times.size == 0:
@@ -82,13 +80,11 @@ def _normalize_summary_stats(sensor_stats: np.ndarray, mode: str) -> np.ndarray:
 
     ``mode`` is one of 'minimal' (4), 'standard' (9), or 'extended' (25).
 
-    first_hit_time is now signed — it is relative to the per-event
-    charge-weighted-median reference (see _charge_weighted_median / __getitem__) —
-    so it uses a sign-preserving log. Charges and Δt features are non-negative, so
-    signed-log reduces to log1p for them. For 'minimal' and 'standard' every
-    column is handled by the same sign-preserving log (the only signed columns —
-    first_hit_time, and in 'minimal' the charge-weighted mean time — are covered,
-    and it reduces to log1p on the non-negative columns).
+    Time columns are signed (relative to the per-event charge-weighted-median
+    reference, see _charge_weighted_median / __getitem__) and use a
+    sign-preserving log; on non-negative columns (charges, Δt) that reduces to
+    log1p. 'minimal' and 'standard' apply the sign-preserving log to every
+    column.
 
     For the 25 extended features:
       - Absolute time percentiles (indices 4-7, 9-14) are converted to
@@ -162,7 +158,7 @@ class MmapDataset(torch.utils.data.Dataset):
                 IceCube-only.
             summary_stats_mode: nt-summary-stats mode, one of 'minimal' (4),
                 'standard' (9), or 'extended' (25). When None (default), falls
-                back to the legacy ``extended_stats`` bool.
+                back to the ``extended_stats`` bool.
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
@@ -256,14 +252,11 @@ class MmapDataset(torch.utils.data.Dataset):
                     vertex coordinates are detector-centered and in km
                     (see VERTEX_CENTER_M)
         """
-        # Map split index to global index
+        # Map split index to global index, then to (dataset, local) index
         global_idx = self.indices[idx] if self.indices is not None else idx
-
-        # Find which dataset contains this index
         dataset_idx = np.searchsorted(self.cumulative_lengths, global_idx + 1)
         local_idx = global_idx if dataset_idx == 0 else global_idx - self.cumulative_lengths[dataset_idx - 1]
 
-        # Get event and photons
         events, photons_array = self.datasets[dataset_idx]
         event_record = events[local_idx]
 
@@ -274,13 +267,11 @@ class MmapDataset(torch.utils.data.Dataset):
             raise ValueError(f"Invalid photon indices: {start_idx} >= {end_idx}")
 
         photons = photons_array[start_idx:end_idx].copy()
-        
-        # center times on the charge-weighted median (robust per-event reference,
-        # data-MC consistent) instead of the unstable event minimum. Times become
-        # signed (early hits negative); inter-DOM structure is unchanged.
+
+        # center times on the charge-weighted median (robust, data-MC consistent
+        # per-event reference); times become signed (early hits negative).
         photons['t'] -= _charge_weighted_median(photons['t'], photons['charge'])
 
-        # Process photons
         if self.use_summary_stats and len(photons) > 0:
             photons_dict = {
                 'sensor_pos_x': photons['x'],
@@ -325,7 +316,6 @@ class MmapDataset(torch.utils.data.Dataset):
         initial_energy = event_record['initial_energy']
         log_energy = np.log10(max(initial_energy, 1e-6))
 
-        # Spherical to Cartesian direction
         dir_x = np.sin(initial_zenith) * np.cos(initial_azimuth)
         dir_y = np.sin(initial_zenith) * np.sin(initial_azimuth)
         dir_z = np.cos(initial_zenith)
