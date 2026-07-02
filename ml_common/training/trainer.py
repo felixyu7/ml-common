@@ -200,7 +200,7 @@ class Trainer:
 
     def _init_csv_writer(self, metrics: Dict[str, float]):
         """Initialize CSV writer with appropriate fields."""
-        base_fields = ['epoch', 'step', 'train_loss', 'val_loss', 'learning_rate']
+        base_fields = ['epoch', 'step', 'train_loss', 'train_loss_epoch', 'val_loss', 'learning_rate']
         additional = [k for k in metrics.keys() if k not in base_fields]
         all_fields = base_fields + additional
 
@@ -281,7 +281,9 @@ class Trainer:
 
             # Accumulate on-device; loss.item() would sync the stream every
             # step, so the host only reads it back on the logging cadences.
-            running_loss = running_loss + loss.detach()
+            # .float() is essential: a bf16 running sum saturates at +-1024
+            # (increments fall below the ulp), silently corrupting the average.
+            running_loss = running_loss + loss.detach().float()
             if self.current_step % 20 == 0:
                 pbar.set_postfix({
                     'Loss': f'{loss.item():.6f}',
@@ -300,7 +302,10 @@ class Trainer:
             self.current_step += 1
 
         avg_loss = float(running_loss) / max(1, batches_seen)
-        return {'train_loss': avg_loss}
+        # Distinct key from the per-step instantaneous 'train_loss': logging the
+        # epoch mean under the same key paints a spurious spike onto the
+        # per-step chart at every epoch boundary.
+        return {'train_loss_epoch': avg_loss}
 
     def _print_profiling_results(self, forward_times: list, total_time: float):
         """Print profiling statistics."""
@@ -514,7 +519,7 @@ class Trainer:
 
             self.save_checkpoint(epoch_metrics, is_best)
             epoch_pbar.set_postfix({
-                'Train Loss': f'{train_metrics["train_loss"]:.6f}',
+                'Train Loss': f'{train_metrics["train_loss_epoch"]:.6f}',
                 'Val Loss': f'{val_metrics["val_loss"]:.6f}'
             })
 

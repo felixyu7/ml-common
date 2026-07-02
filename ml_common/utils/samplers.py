@@ -82,6 +82,44 @@ class RandomChunkSampler(Sampler[int]):
         return self.num_samples
 
 
+class ProportionalInterleaveSampler(Sampler[int]):
+    """Deterministic sampler for block-concatenated two-class datasets
+    (e.g. ``BinaryLabelDataset``: indices [0, len_0) are class 0, the rest
+    class 1).
+
+    Plain ``SequentialSampler`` on such a dataset yields single-class batches
+    (all class 0, then all class 1), which zeroes out batchwise pairwise losses
+    such as the pAUC surrogate. Plain ``RandomSampler`` mixes classes but turns
+    validation into random disk reads. This sampler keeps both properties:
+    the two blocks are merged by proportional position, so every batch contains
+    both classes at the dataset ratio (up to +-2 events, provided
+    ``batch_size >~ len(dataset) / min(len_0, len_1)``), while indices within
+    each class remain strictly increasing — two sequential read streams over
+    the underlying memory-mapped files.
+    """
+
+    def __init__(self, len_0: int, len_1: int) -> None:
+        if len_0 < 0 or len_1 < 0:
+            raise ValueError(f"lengths must be non-negative, got {len_0}, {len_1}")
+        self.len_0 = len_0
+        self.len_1 = len_1
+        # Merge by proportional position within each block: element i of a
+        # block of length L gets key (i + 0.5) / L; a stable argsort of the
+        # concatenated keys is the low-discrepancy proportional interleave.
+        keys = np.concatenate([
+            (np.arange(len_0) + 0.5) / max(len_0, 1),
+            (np.arange(len_1) + 0.5) / max(len_1, 1),
+        ])
+        idx = np.concatenate([np.arange(len_0), len_0 + np.arange(len_1)])
+        self._indices = idx[np.argsort(keys, kind="stable")]
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._indices)
+
+    def __len__(self) -> int:
+        return self.len_0 + self.len_1
+
+
 class LargeWeightedRandomSampler(Sampler[int]):
     """Weighted sampler with replacement that bypasses torch.multinomial's 2^24 limit.
 

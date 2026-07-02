@@ -10,7 +10,9 @@ from .kaggle import KaggleDataset, load_sensor_geometry, get_icecube_file_names
 from .i3 import I3IterableDataset, ICECUBE_AVAILABLE
 from .parquet import ParquetDataset
 from ..utils.collators import IrregularDataCollator
-from ..utils.samplers import RandomChunkSampler, LargeWeightedRandomSampler
+from ..utils.samplers import (
+    RandomChunkSampler, LargeWeightedRandomSampler, ProportionalInterleaveSampler,
+)
 from ..utils.energy_weights import compute_energy_weights, extract_energies
 
 
@@ -211,7 +213,11 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         valid_dataset = BinaryLabelDataset(val_ds_0, val_ds_1)
 
         train_sampler = _make_train_sampler(train_dataset, data_options)
-        val_sampler = SequentialSampler(valid_dataset)
+        # The dataset is block-concatenated (all class 0, then all class 1):
+        # SequentialSampler would make every val batch single-class, zeroing
+        # batchwise pairwise losses (pauc). The proportional interleave keeps
+        # batches class-mixed while preserving sequential reads per class.
+        val_sampler = ProportionalInterleaveSampler(valid_dataset.len_0, valid_dataset.len_1)
 
     else:
         # Single path with runtime splitting
