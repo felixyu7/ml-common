@@ -46,7 +46,13 @@ class IrregularDataCollator:
             if isinstance(event, dict):
                 coords = event.get('coords')
                 features = event.get('features')
-                labels = event.get('labels') or event.get('targets') or event.get('target')
+                # Explicit None checks: `or` would coerce array truthiness and
+                # raise on any multi-element label tensor.
+                labels = event.get('labels')
+                if labels is None:
+                    labels = event.get('targets')
+                if labels is None:
+                    labels = event.get('target')
                 if coords is None or features is None or labels is None:
                     raise KeyError(
                         "Dict sample must include 'coords', 'features', and 'labels'/'targets'/'target'"

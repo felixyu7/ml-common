@@ -174,6 +174,7 @@ class MmapDataset(torch.utils.data.Dataset):
         self.dataset_type = None
 
         # Load all mmap files
+        first_photon_dtype = None
         for path in mmap_paths:
             events, photons_array, photon_dtype = load_ntmmap(path)
 
@@ -185,12 +186,21 @@ class MmapDataset(torch.utils.data.Dataset):
                 else:
                     self.dataset_type = 'icecube'
 
+            if first_photon_dtype is None:
+                first_photon_dtype = photon_dtype
+            elif photon_dtype != first_photon_dtype:
+                raise ValueError(
+                    f"photon dtype mismatch in {path}: expected {first_photon_dtype}, "
+                    f"got {photon_dtype}. All mmap files in one dataset must share a schema."
+                )
+
             self.datasets.append((events, photons_array))
             total_length += len(events)
             self.cumulative_lengths.append(total_length)
 
         self.total_events = total_length
-        self.photon_dtype = photon_dtype
+        self.cumulative_lengths = np.asarray(self.cumulative_lengths, dtype=np.int64)
+        self.photon_dtype = first_photon_dtype
         self.task = (task or 'event_reconstruction').lower()
         if self.task not in {'event_reconstruction', 'starting_classification'}:
             raise ValueError(f"Unsupported task '{task}'. Expected 'event_reconstruction' or 'starting_classification'.")

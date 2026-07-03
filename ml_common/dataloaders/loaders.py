@@ -135,9 +135,9 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         # Parquet format with stochastic loss info (Prometheus MC)
         val_split = data_options.get('val_split', 0.2)
         split_seed = data_options.get('split_seed', 42)
-        max_cascades = data_options.get('max_cascades', 100)
-        min_cascade_energy = data_options.get('min_cascade_energy', 0.5)
-        cache_size = data_options.get('cache_size', 2)
+        max_stochastic = data_options.get('max_stochastic', 100)
+        min_stochastic_energy = data_options.get('min_stochastic_energy', 0.5)
+        cache_size = data_options.get('cache_size', 20)
 
         if 'data_path' in data_options:
             # Single path with runtime splitting
@@ -148,8 +148,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 val_split=val_split,
                 split_seed=split_seed,
                 task=task,
-                max_cascades=max_cascades,
-                min_cascade_energy=min_cascade_energy,
+                max_stochastic=max_stochastic,
+                min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
@@ -162,8 +162,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 val_split=val_split,
                 split_seed=split_seed,
                 task=task,
-                max_cascades=max_cascades,
-                min_cascade_energy=min_cascade_energy,
+                max_stochastic=max_stochastic,
+                min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
@@ -174,8 +174,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 parquet_paths=data_options['train_data_path'],
                 use_summary_stats=data_options.get('use_summary_stats', True),
                 task=task,
-                max_cascades=max_cascades,
-                min_cascade_energy=min_cascade_energy,
+                max_stochastic=max_stochastic,
+                min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
@@ -185,8 +185,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 parquet_paths=data_options['valid_data_path'],
                 use_summary_stats=data_options.get('use_summary_stats', True),
                 task=task,
-                max_cascades=max_cascades,
-                min_cascade_energy=min_cascade_energy,
+                max_stochastic=max_stochastic,
+                min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
                 extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,

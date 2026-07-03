@@ -2,6 +2,7 @@
 
 import csv
 import math
+import random
 import time
 import torch
 import numpy as np
@@ -74,6 +75,17 @@ class Trainer:
         # Training state
         self.current_epoch = 0
         self.current_step = 0
+
+        # Pass the true batch size when the model accepts it (Neptune infers B
+        # from max(batch_ids)+1 otherwise, dropping trailing zero-hit events).
+        # Signature-gated so the Trainer stays generic over models.
+        try:
+            import inspect
+            self._model_accepts_batch_size = (
+                'batch_size' in inspect.signature(model.forward).parameters
+            )
+        except (TypeError, ValueError):
+            self._model_accepts_batch_size = False
 
         # Best-checkpoint selection (default: minimize val_loss)
         self.best_metric_key = training_opts.get('best_metric_key', 'val_loss')
@@ -210,6 +222,25 @@ class Trainer:
         )
         self.csv_writer.writeheader()
 
+    def _extend_csv_fields(self, metrics: Dict[str, float]):
+        """Rewrite metrics.csv with the extended fieldname union.
+
+        DictWriter freezes its header on creation; without this, keys that
+        first appear later (epoch/task metrics after per-step train_loss rows)
+        would be silently dropped by extrasaction='ignore'.
+        """
+        new_fields = [k for k in metrics.keys() if k not in self.csv_writer.fieldnames]
+        all_fields = list(self.csv_writer.fieldnames) + new_fields
+        self.csv_file_handle.close()
+        with open(self.csv_file, newline='') as fh:
+            rows = list(csv.DictReader(fh))
+        self.csv_file_handle = open(self.csv_file, 'w', newline='')
+        self.csv_writer = csv.DictWriter(
+            self.csv_file_handle, fieldnames=all_fields, extrasaction='ignore'
+        )
+        self.csv_writer.writeheader()
+        self.csv_writer.writerows(rows)
+
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None):
         """Log metrics to W&B or CSV."""
         if self.use_wandb:
@@ -221,8 +252,14 @@ class Trainer:
         else:
             if self.csv_writer is None:
                 self._init_csv_writer(metrics)
+            elif any(k not in self.csv_writer.fieldnames for k in metrics):
+                self._extend_csv_fields(metrics)
 
-            row = {'epoch': self.current_epoch, 'step': step or 0, **metrics}
+            row = {
+                'epoch': self.current_epoch,
+                'step': self.current_step if step is None else step,
+                **metrics,
+            }
             self.csv_writer.writerow(row)
             self.csv_file_handle.flush()
 
@@ -254,12 +291,15 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
             coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
             batches_seen += 1
+            bs_kwargs = (
+                {'batch_size': labels.shape[0]} if self._model_accepts_batch_size else {}
+            )
 
             self.optimizer.zero_grad()
 
             # Forward pass with mixed precision
             with self._get_autocast_context():
-                preds = self.model(coords, feats, batch_ids=batch_ids)
+                preds = self.model(coords, feats, batch_ids=batch_ids, **bs_kwargs)
                 loss = self.loss_fn(preds, labels)
 
             # Backward pass with gradient scaling
@@ -268,16 +308,21 @@ class Trainer:
                 if self.grad_clip > 0:
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                scale_before = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                # A shrunken scale means step() skipped the optimizer on
+                # inf/NaN grads; advancing the schedule then would desync the
+                # LR from the real optimizer step count.
+                if self.scaler.get_scale() >= scale_before:
+                    self.scheduler.step()
             else:
                 loss.backward()
                 if self.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
-
-            # Per-step LR schedule update (after the optimizer step)
-            self.scheduler.step()
+                # Per-step LR schedule update (after the optimizer step)
+                self.scheduler.step()
 
             # Accumulate on-device; loss.item() would sync the stream every
             # step, so the host only reads it back on the logging cadences.
@@ -333,6 +378,7 @@ class Trainer:
 
         self.model.eval()
         total_loss = 0.0
+        total_events = 0
         all_preds, all_labels = [], []
         forward_times = []
 
@@ -355,35 +401,43 @@ class Trainer:
                 total=val_total,
                 position=2,
             )
-            for coords, features, labels in val_pbar:
+            for val_batch_idx, (coords, features, labels) in enumerate(val_pbar):
                 coords = coords.to(self.device, non_blocking=True)
                 features = features.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
                 coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
+                bs_kwargs = (
+                    {'batch_size': labels.shape[0]} if self._model_accepts_batch_size else {}
+                )
 
                 with self._get_autocast_context():
                     if profile:
                         t0 = time.time()
-                    preds = self.model(coords, feats, batch_ids=batch_ids)
+                    preds = self.model(coords, feats, batch_ids=batch_ids, **bs_kwargs)
                     if profile:
                         if self.device.type == 'cuda':
                             torch.cuda.synchronize()
                         forward_times.append(time.time() - t0)
 
                     loss = self.loss_fn(preds, labels)
-                loss_value = loss.item()
-                total_loss += loss_value
+                # Accumulate on-device and weight by batch size: .item() every
+                # batch would sync per batch, and an unweighted mean of batch
+                # means over-weights the last partial batch.
+                bsz = labels.shape[0]
+                total_loss = total_loss + loss.detach().float() * bsz
+                total_events += bsz
                 # fp32 accumulation: the best-checkpoint metric is computed from
                 # these, and bf16 autocast outputs would quantize it (~0.4%).
                 all_preds.append(preds.float().cpu())
                 all_labels.append(labels.float().cpu())
-                val_pbar.set_postfix({'Val Loss': f'{loss_value:.6f}'})
+                if val_batch_idx % 20 == 0:
+                    val_pbar.set_postfix({'Val Loss': f'{loss.item():.6f}'})
 
         if profile:
             self._print_profiling_results(forward_times, time.time() - start_time)
 
         batch_count = len(all_preds)
-        avg_val_loss = total_loss / max(1, batch_count)
+        avg_val_loss = float(total_loss) / max(1, total_events)
 
         metrics = {'val_loss': avg_val_loss}
 
@@ -406,6 +460,31 @@ class Trainer:
 
         return metrics
 
+    @staticmethod
+    def _collect_rng_state() -> Dict[str, Any]:
+        # numpy's MT19937 keys are uint32; stage through int64 (from_numpy
+        # rejects uint32 on some torch versions).
+        np_name, np_keys, np_pos, np_has_gauss, np_cached = np.random.get_state()
+        return {
+            'python': random.getstate(),
+            'numpy': (np_name, torch.from_numpy(np_keys.astype(np.int64)),
+                      int(np_pos), int(np_has_gauss), float(np_cached)),
+            'torch': torch.get_rng_state(),
+            'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        }
+
+    @staticmethod
+    def _restore_rng_state(rng_state: Dict[str, Any]):
+        # map_location may have moved the byte tensors off-CPU; move them back.
+        random.setstate(rng_state['python'])
+        np_name, np_keys, np_pos, np_has_gauss, np_cached = rng_state['numpy']
+        np.random.set_state(
+            (np_name, np_keys.cpu().numpy().astype(np.uint32), np_pos, np_has_gauss, np_cached)
+        )
+        torch.set_rng_state(rng_state['torch'].cpu())
+        if rng_state.get('cuda') is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([s.cpu() for s in rng_state['cuda']])
+
     def save_checkpoint(self, metrics: Dict[str, float], is_best: bool = False, is_final: bool = False):
         """Save model checkpoint."""
         checkpoint = {
@@ -416,7 +495,11 @@ class Trainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'metrics': metrics,
-            'cfg': self.cfg
+            'cfg': self.cfg,
+            # RNG state so a resume reproduces sampler order, DOM dropout,
+            # and drop-path decisions. Stored as tensors/primitives only so
+            # the checkpoint stays loadable under weights_only=True.
+            'rng_state': self._collect_rng_state(),
         }
 
         if self.scaler is not None:
@@ -469,6 +552,11 @@ class Trainer:
             if self.scaler is not None and 'scaler_state_dict' in checkpoint:
                 self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
+            # Restore RNG state (absent in pre-fix checkpoints).
+            rng_state = checkpoint.get('rng_state')
+            if rng_state is not None:
+                self._restore_rng_state(rng_state)
+
     def fit(self, train_loader: DataLoader, val_loader: DataLoader):
         """Train model."""
         print(f"Starting training for {self.epochs} epochs...")
@@ -505,7 +593,10 @@ class Trainer:
             # Surface a silent compile/packed fallback (throughput downgrade).
             epoch_metrics['encoder_compiled'] = float(
                 getattr(self.model, 'encoder_compiled', True))
-            self.log_metrics(epoch_metrics)
+            # Explicit step: mixing wandb's implicit step counter with the
+            # per-step logs' explicit one misaligns epoch metrics on the
+            # step axis.
+            self.log_metrics(epoch_metrics, step=self.current_step)
 
             current_val = epoch_metrics.get(self.best_metric_key)
             if current_val is None:

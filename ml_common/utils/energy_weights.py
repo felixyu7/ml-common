@@ -1,6 +1,7 @@
 """Energy-dependent sample weighting for imbalanced MC spectra."""
 
 import numpy as np
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from typing import Tuple, Optional, Union, List
 
@@ -18,8 +19,13 @@ def extract_energies(dataset) -> Tuple[np.ndarray, np.ndarray]:
     if isinstance(dataset, BinaryLabelDataset):
         e0, d0 = extract_energies(dataset.dataset_0)
         e1, d1 = extract_energies(dataset.dataset_1)
-        # Offset dataset_ids for second dataset
-        d1 = d1 + (d0.max() + 1 if len(d0) > 0 else 0)
+        # Offset dataset_1's ids by dataset_0's structural sub-dataset count,
+        # not max(d0)+1: a split that leaves trailing sub-datasets of class 0
+        # empty would silently shift dataset_1's ids (and its spectral_index
+        # alignment) down.
+        ds0 = dataset.dataset_0
+        n0 = len(ds0.datasets) if hasattr(ds0, 'datasets') else len(ds0.files)
+        d1 = d1 + n0
         return np.concatenate([e0, e1]), np.concatenate([d0, d1])
 
     if isinstance(dataset, MmapDataset):
@@ -40,8 +46,11 @@ def extract_energies(dataset) -> Tuple[np.ndarray, np.ndarray]:
         all_ids = []
         for i, f in enumerate(dataset.files):
             table = pq.read_table(f, columns=['mc_truth'])
-            mc = table['mc_truth']
-            energies = mc.field('initial_state_energy').to_numpy(zero_copy_only=False)
+            # table['mc_truth'] is a ChunkedArray, which has no .field();
+            # struct_field handles the chunking.
+            energies = pc.struct_field(
+                table['mc_truth'], 'initial_state_energy'
+            ).to_numpy(zero_copy_only=False)
             all_energies.append(energies.astype(np.float64))
             all_ids.append(np.full(len(energies), i, dtype=np.int32))
         all_energies = np.concatenate(all_energies)

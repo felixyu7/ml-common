@@ -20,9 +20,11 @@ except ImportError:
     HAS_SUMMARY_STATS = False
 
 from .mmap import (
+    _charge_weighted_median,
     _normalize_summary_stats,
     _resolve_summary_stats_mode,
     SUMMARY_STATS_FIRST_HIT_TIME_COL,
+    VERTEX_CENTER_M,
 )
 
 
@@ -43,10 +45,11 @@ class ParquetDataset(torch.utils.data.Dataset):
         [1:4]: direction (x, y, z)
         [4]: pid
         [5]: starting_flag
-        [6:9]: vertex (x, y, z) in meters
+        [6:9]: vertex (x, y, z), detector-centered km
         [9]: n_stochastic (actual count before padding)
         [10:10+max_stochastic]: stochastic_distances in meters
         [10+max_stochastic:10+2*max_stochastic]: stochastic_energies in GeV
+        [10+2*max_stochastic:10+3*max_stochastic]: stochastic_types (mapped 0-3)
     """
 
     def __init__(
@@ -118,6 +121,7 @@ class ParquetDataset(torch.utils.data.Dataset):
             total += n
             self.cumulative_lengths.append(total)
 
+        self.cumulative_lengths = np.asarray(self.cumulative_lengths, dtype=np.int64)
         self.total_events = total
         self.dataset_type = 'prometheus'
 
@@ -194,9 +198,10 @@ class ParquetDataset(torch.utils.data.Dataset):
         hit_z = np.array(photons['sensor_pos_z'], dtype=np.float32)
         hit_t = np.array(photons['t'], dtype=np.float32)
 
-        # Normalize time to start at 0
+        # Center times on the charge-weighted median (matches MmapDataset;
+        # photons carry no charge, so weights are uniform).
         if len(hit_t) > 0:
-            hit_t = hit_t - hit_t.min()
+            hit_t = hit_t - _charge_weighted_median(hit_t, np.ones_like(hit_t))
 
         if self.use_summary_stats and len(hit_t) > 0:
             # Aggregate to DOM level using nt_summary_stats
@@ -251,10 +256,12 @@ class ParquetDataset(torch.utils.data.Dataset):
         dir_y = np.sin(zenith) * np.sin(azimuth)
         dir_z = np.cos(zenith)
 
-        # Vertex position (meters)
-        vertex_x = mc['initial_state_x']
-        vertex_y = mc['initial_state_y']
-        vertex_z = mc['initial_state_z']
+        # Vertex target: detector-centered and converted to km, matching the
+        # MmapDataset label contract (and the km input coordinate frame).
+        cx, cy, cz = VERTEX_CENTER_M[self.dataset_type]
+        vertex_x = (mc['initial_state_x'] - cx) / 1000.0
+        vertex_y = (mc['initial_state_y'] - cy) / 1000.0
+        vertex_z = (mc['initial_state_z'] - cz) / 1000.0
 
         pid = mc['initial_state_type']
         starting_flag = 1.0  # prometheus events are assumed starting
@@ -306,7 +313,7 @@ class ParquetDataset(torch.utils.data.Dataset):
                 dir_x, dir_y, dir_z,           # [1:4] direction
                 pid,                            # [4] particle type
                 starting_flag,                  # [5] starting flag
-                vertex_x, vertex_y, vertex_z,  # [6:9] vertex position
+                vertex_x, vertex_y, vertex_z,  # [6:9] vertex (detector-centered km)
                 float(n_stochastic),             # [9] stochastic loss count
             ], dtype=np.float32),
             pad_distances,  # [10:10+max_stochastic]

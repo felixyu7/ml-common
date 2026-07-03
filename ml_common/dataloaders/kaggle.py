@@ -69,8 +69,10 @@ class KaggleDataset(torch.utils.data.Dataset):
             batch_files: List of batch file paths
             sensor_geometry: Sensor geometry array [n_sensors, 3]
             cache_size: Number of batch files to cache in memory
-            use_summary_stats: Use nt-summary-stats if available
+            use_summary_stats: Use nt-summary-stats features
         """
+        if use_summary_stats and not HAS_SUMMARY_STATS:
+            raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
         self.meta_dir = meta_dir
         self.batch_files = batch_files
         self.batch_file_names = [Path(f).name for f in batch_files]
