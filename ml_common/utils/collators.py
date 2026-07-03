@@ -69,14 +69,17 @@ class IrregularDataCollator:
             features = _to_tensor(features)
             labels = _to_tensor(labels)
 
-            # DOM dropout: randomly drop a fraction of DOMs during training
+            # DOM dropout: independent per-DOM Bernoulli during training,
+            # always keeping at least one DOM. NOT fixed-count subsampling —
+            # int(n*(1-p)) over-drops sparse events (a 2-DOM event loses 50%
+            # at any p > 0) and never leaves an event intact.
             if self.dom_dropout > 0 and self.training:
                 n = coords.shape[0]
-                keep = max(1, int(n * (1 - self.dom_dropout)))
-                if keep < n:
-                    perm = torch.randperm(n)[:keep]
-                    coords = coords[perm]
-                    features = features[perm]
+                keep_mask = torch.rand(n) >= self.dom_dropout
+                if n > 0 and not keep_mask.any():
+                    keep_mask[torch.randint(n, (1,)).item()] = True
+                coords = coords[keep_mask]
+                features = features[keep_mask]
 
             # Add batch index as first column to coords
             batch_indices = torch.full((coords.shape[0], 1), batch_idx, dtype=torch.float32)
