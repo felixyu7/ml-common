@@ -183,7 +183,7 @@ class ParquetDataset(torch.utils.data.Dataset):
         Returns:
             coords: [N, 4] (x, y, z, t) in km/microseconds (matches MmapDataset)
             features: [N, F] log-transformed sensor stats
-            labels: [10 + 2*max_stochastic] extended labels with stochastic loss info
+            labels: [10 + 3*max_stochastic] extended labels with stochastic loss info
         """
         # Map split index to global index
         global_idx = self.indices[idx] if self.indices is not None else idx
@@ -365,57 +365,3 @@ def create_stochastic_mask(n_stochastic: torch.Tensor, max_stochastic: int = 100
     B = n_stochastic.shape[0]
     indices = torch.arange(max_stochastic, device=n_stochastic.device).expand(B, -1)
     return indices < n_stochastic.unsqueeze(1)
-
-
-class FileGroupedSampler(torch.utils.data.Sampler):
-    """Sampler that groups indices by file to minimize parquet file loading.
-
-    Each epoch:
-        1. Shuffles the order of files
-        2. Shuffles event indices within each file
-        3. Yields all events from one file before moving to the next
-
-    This ensures each file is loaded once per epoch, dramatically reducing I/O.
-    """
-
-    def __init__(self, dataset: ParquetDataset, shuffle: bool = True, seed: int = 42):
-        self.dataset = dataset
-        self.shuffle = shuffle
-        self.seed = seed
-        self.epoch = 0
-        self._build_file_groups()
-
-    def _build_file_groups(self):
-        """Group dataset indices by their source file."""
-        n_files = len(self.dataset.files)
-        self.file_groups = [[] for _ in range(n_files)]
-
-        for idx in range(len(self.dataset)):
-            global_idx = self.dataset.indices[idx] if self.dataset.indices is not None else idx
-            file_idx, _ = self.dataset._get_file_and_local_idx(global_idx)
-            self.file_groups[file_idx].append(idx)
-
-        # Filter out empty groups (files with no events in this split)
-        self.file_groups = [g for g in self.file_groups if g]
-
-    def __iter__(self):
-        rng = np.random.RandomState(self.seed + self.epoch)
-
-        # Shuffle file order
-        file_order = list(range(len(self.file_groups)))
-        if self.shuffle:
-            rng.shuffle(file_order)
-
-        # Yield indices file by file
-        for file_idx in file_order:
-            indices = self.file_groups[file_idx].copy()
-            if self.shuffle:
-                rng.shuffle(indices)
-            yield from indices
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def set_epoch(self, epoch: int):
-        """Set epoch for deterministic shuffling across epochs."""
-        self.epoch = epoch

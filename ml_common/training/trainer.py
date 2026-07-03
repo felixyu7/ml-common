@@ -55,7 +55,6 @@ class Trainer:
         self.epochs = training_opts['epochs']
         self.lr = training_opts['lr']
         self.weight_decay = training_opts['weight_decay']
-        self.batch_size = training_opts['batch_size']
         self.precision = training_opts.get('precision', 'fp32')
         self.save_epochs = training_opts.get('save_epochs', 5)
         self.grad_clip = training_opts.get('grad_clip', 1.0)
@@ -340,9 +339,6 @@ class Trainer:
                     'train_loss': loss.item(),
                     'learning_rate': self.scheduler.get_last_lr()[0]
                 }
-                if self.use_wandb and hasattr(self.loss_fn, 'current_weights'):
-                    vmf_weight, _ = self.loss_fn.current_weights()
-                    metrics['vmf_weight'] = float(vmf_weight)
                 self.log_metrics(metrics, step=self.current_step)
             self.current_step += 1
 

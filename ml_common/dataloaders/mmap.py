@@ -200,7 +200,6 @@ class MmapDataset(torch.utils.data.Dataset):
 
         self.total_events = total_length
         self.cumulative_lengths = np.asarray(self.cumulative_lengths, dtype=np.int64)
-        self.photon_dtype = first_photon_dtype
         self.task = (task or 'event_reconstruction').lower()
         if self.task not in {'event_reconstruction', 'starting_classification'}:
             raise ValueError(f"Unsupported task '{task}'. Expected 'event_reconstruction' or 'starting_classification'.")

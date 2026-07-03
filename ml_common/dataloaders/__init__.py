@@ -3,7 +3,7 @@
 from .mmap import MmapDataset
 from .kaggle import KaggleDataset, load_sensor_geometry, get_icecube_file_names
 from .i3 import I3IterableDataset, ICECUBE_AVAILABLE
-from .parquet import ParquetDataset, unpack_stochastic_labels, create_stochastic_mask, FileGroupedSampler
+from .parquet import ParquetDataset, unpack_stochastic_labels, create_stochastic_mask
 from .loaders import create_dataloaders
 from ..utils.energy_weights import compute_energy_weights, extract_energies
 
@@ -18,7 +18,6 @@ __all__ = [
     'create_dataloaders',
     'unpack_stochastic_labels',
     'create_stochastic_mask',
-    'FileGroupedSampler',
     'compute_energy_weights',
     'extract_energies',
 ]

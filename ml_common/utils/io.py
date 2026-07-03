@@ -53,9 +53,3 @@ def load_ntmmap(input_path: str) -> Tuple[np.memmap, np.memmap, np.dtype]:
         _madvise(index_mmap, _mmap_mod.MADV_WILLNEED)
 
     return index_mmap, photons_array, photon_dtype
-
-
-def batched_coordinates(coords: np.ndarray, batch_size: int) -> np.ndarray:
-    """Add batch indices as first column to coordinates [N,D] -> [N,D+1]."""
-    batch_indices = np.arange(len(coords)) // batch_size
-    return np.column_stack([batch_indices, coords])
