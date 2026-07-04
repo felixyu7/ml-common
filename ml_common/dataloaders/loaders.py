@@ -238,6 +238,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
                 morphology_filter=morphology_filter,
+                physics_labels=data_options.get('physics_labels'),
             )
 
             valid_dataset = MmapDataset(
@@ -250,6 +251,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
                 morphology_filter=morphology_filter,
+                physics_labels=data_options.get('physics_labels'),
             )
 
         else:

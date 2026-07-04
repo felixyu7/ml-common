@@ -135,6 +135,7 @@ class MmapDataset(torch.utils.data.Dataset):
         extended_stats: bool = False,
         morphology_filter: Optional[Union[List[int], Dict[int, float]]] = None,
         summary_stats_mode: Optional[str] = None,
+        physics_labels: Optional[Dict] = None,
     ):
         """
         Initialize MmapDataset.
@@ -246,6 +247,22 @@ class MmapDataset(torch.utils.data.Dataset):
         split_length = len(self.indices) if self.indices is not None else self.total_events
         split_str = f" ({split} split from {self.total_events:,} total)" if split != "full" else ""
         print(f"Loaded {self.dataset_type} dataset: {split_length:,} events{split_str}")
+
+        # Physics-informed per-event label smoothing: append [L_mu, margin_in, margin_out]
+        # to each label so the morphology loss can soften only genuinely ambiguous events.
+        # IceCube-only (needs final_type/final_energy + the ExtrudedPolygon that defines the
+        # morphology labels). See utils.detector_geometry.
+        self._detector = None
+        self.physics_labels = physics_labels if (physics_labels and physics_labels.get("enabled")) else None
+        if self.physics_labels is not None:
+            if self.dataset_type != 'icecube':
+                raise ValueError("physics_labels is IceCube-only.")
+            from ..utils.detector_geometry import ExtrudedPolygon
+            self._detector = ExtrudedPolygon.from_geo_file(
+                self.physics_labels["geo_path"],
+                z_shift_m=self.physics_labels.get("z_shift_m", 1942.0),
+                padding_m=self.physics_labels.get("padding_m", 50.0),
+            )
 
     def __len__(self):
         return len(self.indices) if self.indices is not None else self.total_events
@@ -361,7 +378,37 @@ class MmapDataset(torch.utils.data.Dataset):
 
         labels = np.array([log_energy, dir_x, dir_y, dir_z, class_field, starting_flag, vertex_x, vertex_y, vertex_z], dtype=np.float32)
 
+        if self._detector is not None:
+            labels = np.concatenate([labels, self._physics_label(event_record, dir_x, dir_y, dir_z)])
+
         return pos, feats, labels
+
+    def _physics_label(self, event_record, dir_x, dir_y, dir_z):
+        """Per-event [L_mu, margin_in, margin_out] (meters) for physics-informed smoothing.
+
+        L_mu: muon CSDA range from the leading muon (|pdg|==13) secondary energy (0 if none).
+        margin_in: signed distance of the interaction/entry vertex to the detector surface.
+        margin_out: same for the muon exit point (vertex - L_mu*dir; IceCube direction points
+        back toward the source, so propagation is along -dir). NaN vertices (uncontained/
+        bundle) map to a large positive margin (never softened; those classes stay hard)."""
+        from ..utils.detector_geometry import muon_range_m
+        ftype = event_record['final_type']
+        fen = event_record['final_energy']
+        mu_mask = np.abs(ftype) == 13
+        mu_e = float(fen[mu_mask].max()) if mu_mask.any() else 0.0
+        L_mu = float(muon_range_m(mu_e))
+
+        vtx = np.array([event_record['vertex_x'], event_record['vertex_y'],
+                        event_record['vertex_z']], dtype=np.float64)  # raw meters (icecube-centered)
+        direction = np.array([dir_x, dir_y, dir_z], dtype=np.float64)
+        exit_pt = vtx - L_mu * direction
+        m_in = float(self._detector.margin(vtx))
+        m_out = float(self._detector.margin(exit_pt))
+        if not np.isfinite(m_in):
+            m_in = 1e9
+        if not np.isfinite(m_out):
+            m_out = 1e9
+        return np.array([L_mu, m_in, m_out], dtype=np.float32)
 
 
 class BinaryLabelDataset(torch.utils.data.Dataset):
