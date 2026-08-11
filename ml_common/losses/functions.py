@@ -5,13 +5,6 @@ import torch.nn.functional as F
 import numpy as np
 from torch import Tensor
 
-from directional_distributions import (
-    von_mises_fisher_loss,
-    iag_nll_loss,
-    esag_nll_loss,
-    gag_nll_loss,
-)
-
 
 def angular_distance_loss(
     pred: Tensor,

@@ -3,7 +3,7 @@
 import torch
 import numpy as np
 from torch.utils.data.sampler import Sampler
-from typing import Optional, Iterator, Sized
+from typing import Iterator, Sized
 
 
 class RandomChunkSampler(Sampler[int]):
@@ -14,36 +14,18 @@ class RandomChunkSampler(Sampler[int]):
     within each chunk shuffled. Maximizes cache efficiency when loading chunked data.
     """
 
-    def __init__(
-        self,
-        data_source: Sized,
-        chunks: list,
-        num_samples: Optional[int] = None,
-        generator=None
-    ) -> None:
+    def __init__(self, data_source: Sized, chunks: list, generator=None) -> None:
         """
         Initialize RandomChunkSampler.
 
         Args:
             data_source: Dataset
             chunks: List of chunk sizes (number of events per chunk)
-            num_samples: Number of samples (defaults to len(data_source))
             generator: Random number generator
         """
         self.data_source = data_source
-        self._num_samples = num_samples
         self.generator = generator
         self.chunks = chunks
-
-        if not isinstance(self.num_samples, int) or self.num_samples <= 0:
-            raise ValueError(f"num_samples must be positive int, got {self.num_samples}")
-
-    @property
-    def num_samples(self) -> int:
-        """Return number of samples to draw."""
-        if self._num_samples is None:
-            return len(self.data_source)
-        return self._num_samples
 
     def __iter__(self) -> Iterator[int]:
         """Generate sample indices: chunks in random order, events shuffled within each."""
@@ -65,7 +47,7 @@ class RandomChunkSampler(Sampler[int]):
             yield from chunk_indices.tolist()
 
     def __len__(self) -> int:
-        return self.num_samples
+        return len(self.data_source)
 
 
 class ProportionalInterleaveSampler(Sampler[int]):

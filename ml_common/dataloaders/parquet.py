@@ -93,7 +93,6 @@ class ParquetDataset(torch.utils.data.Dataset):
         self.max_stochastic = max_stochastic
         self.min_stochastic_energy = min_stochastic_energy
         self.cache_size = cache_size
-        self.task = (task or 'event_reconstruction').lower()
 
         # Find parquet files (handles single path, directory, or list of either)
         if isinstance(parquet_paths, (str, Path)):
@@ -111,14 +110,10 @@ class ParquetDataset(torch.utils.data.Dataset):
             raise ValueError(f"No parquet files found at {parquet_paths}")
 
         # Get file lengths without loading data (only reads metadata)
-        self.file_lengths = []
         self.cumulative_lengths = []
         total = 0
         for f in self.files:
-            pf = pq.ParquetFile(f)
-            n = pf.metadata.num_rows
-            self.file_lengths.append(n)
-            total += n
+            total += pq.ParquetFile(f).metadata.num_rows
             self.cumulative_lengths.append(total)
 
         self.cumulative_lengths = np.asarray(self.cumulative_lengths, dtype=np.int64)

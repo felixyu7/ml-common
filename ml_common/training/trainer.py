@@ -1,6 +1,6 @@
 """Generic trainer class for PyTorch models."""
 
-import csv
+import json
 import math
 import random
 import time
@@ -181,23 +181,16 @@ class Trainer:
         self.checkpoint_dir.mkdir(exist_ok=True)
 
         if not self.use_wandb:
-            self.csv_file = self.save_dir / 'metrics.csv'
-            self.csv_writer = None
-            self.csv_file_handle = None
+            # JSONL: rows are schema-free (epoch/task metrics add keys mid-run)
+            # and appends need no long-lived writer handle.
+            self.metrics_file = self.save_dir / 'metrics.jsonl'
+            self.metrics_file.unlink(missing_ok=True)
 
-    def _get_autocast_context(self, precision: str = None):
-        """Get autocast context manager for the given precision."""
-        if precision is None:
-            precision = self.precision
-
-        dtype = self._precision_to_dtype(precision)
-        device = 'cuda' if self.device.type == 'cuda' else 'cpu'
-
-        # Fall back to fp16 if bf16 not supported
-        if device == 'cuda' and dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
-            dtype = torch.float16
-
-        return torch.amp.autocast(device, dtype=dtype) if dtype is not None else nullcontext()
+    def _get_autocast_context(self):
+        """Autocast context from the device/dtype resolved in _setup_mixed_precision."""
+        if self.amp_dtype is None:
+            return nullcontext()
+        return torch.amp.autocast(self.amp_device, dtype=self.amp_dtype)
 
     def _default_batch_prep(
         self, coords_b: torch.Tensor, features_b: torch.Tensor, labels_b: torch.Tensor
@@ -209,39 +202,8 @@ class Trainer:
         feats = features_b if (features_b is not None and features_b.numel() > 0) else None
         return coords, feats, batch_ids, labels_b
 
-    def _init_csv_writer(self, metrics: Dict[str, float]):
-        """Initialize CSV writer with appropriate fields."""
-        base_fields = ['epoch', 'step', 'train_loss', 'train_loss_epoch', 'val_loss', 'learning_rate']
-        additional = [k for k in metrics.keys() if k not in base_fields]
-        all_fields = base_fields + additional
-
-        self.csv_file_handle = open(self.csv_file, 'w', newline='')
-        self.csv_writer = csv.DictWriter(
-            self.csv_file_handle, fieldnames=all_fields, extrasaction='ignore'
-        )
-        self.csv_writer.writeheader()
-
-    def _extend_csv_fields(self, metrics: Dict[str, float]):
-        """Rewrite metrics.csv with the extended fieldname union.
-
-        DictWriter freezes its header on creation; without this, keys that
-        first appear later (epoch/task metrics after per-step train_loss rows)
-        would be silently dropped by extrasaction='ignore'.
-        """
-        new_fields = [k for k in metrics.keys() if k not in self.csv_writer.fieldnames]
-        all_fields = list(self.csv_writer.fieldnames) + new_fields
-        self.csv_file_handle.close()
-        with open(self.csv_file, newline='') as fh:
-            rows = list(csv.DictReader(fh))
-        self.csv_file_handle = open(self.csv_file, 'w', newline='')
-        self.csv_writer = csv.DictWriter(
-            self.csv_file_handle, fieldnames=all_fields, extrasaction='ignore'
-        )
-        self.csv_writer.writeheader()
-        self.csv_writer.writerows(rows)
-
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None):
-        """Log metrics to W&B or CSV."""
+        """Log metrics to W&B or a JSONL file."""
         if self.use_wandb:
             try:
                 import wandb
@@ -249,18 +211,29 @@ class Trainer:
             except ImportError:
                 pass
         else:
-            if self.csv_writer is None:
-                self._init_csv_writer(metrics)
-            elif any(k not in self.csv_writer.fieldnames for k in metrics):
-                self._extend_csv_fields(metrics)
-
             row = {
                 'epoch': self.current_epoch,
                 'step': self.current_step if step is None else step,
                 **metrics,
             }
-            self.csv_writer.writerow(row)
-            self.csv_file_handle.flush()
+            with open(self.metrics_file, 'a') as fh:
+                fh.write(json.dumps(row) + '\n')
+
+    def _prepare_device_batch(self, coords, features, labels):
+        """Move a raw collated batch to the device and run batch prep."""
+        coords = coords.to(self.device, non_blocking=True)
+        features = features.to(self.device, non_blocking=True)
+        labels = labels.to(self.device, non_blocking=True)
+        return self.batch_prep_fn(coords, features, labels)
+
+    def _forward_batch(self, coords, feats, batch_ids, labels):
+        """Model forward + loss under autocast. Shared by train and validate."""
+        bs_kwargs = (
+            {'batch_size': labels.shape[0]} if self._model_accepts_batch_size else {}
+        )
+        with self._get_autocast_context():
+            preds = self.model(coords, feats, batch_ids=batch_ids, **bs_kwargs)
+            return preds, self.loss_fn(preds, labels)
 
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """Train for one epoch."""
@@ -284,22 +257,12 @@ class Trainer:
             position=1,
         )
 
-        for batch_idx, (coords, features, labels) in enumerate(pbar):
-            coords = coords.to(self.device, non_blocking=True)
-            features = features.to(self.device, non_blocking=True)
-            labels = labels.to(self.device, non_blocking=True)
-            coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
+        for batch_idx, batch in enumerate(pbar):
+            coords, feats, batch_ids, labels = self._prepare_device_batch(*batch)
             batches_seen += 1
-            bs_kwargs = (
-                {'batch_size': labels.shape[0]} if self._model_accepts_batch_size else {}
-            )
 
             self.optimizer.zero_grad()
-
-            # Forward pass with mixed precision
-            with self._get_autocast_context():
-                preds = self.model(coords, feats, batch_ids=batch_ids, **bs_kwargs)
-                loss = self.loss_fn(preds, labels)
+            preds, loss = self._forward_batch(coords, feats, batch_ids, labels)
 
             # Backward pass with gradient scaling
             if self.scaler is not None:
@@ -375,6 +338,8 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         total_events = 0
+        # Predictions/labels are only staged to CPU when something consumes them.
+        collect_outputs = self.metric_fn is not None or save_predictions
         all_preds, all_labels = [], []
         forward_times = []
 
@@ -397,62 +362,53 @@ class Trainer:
                 total=val_total,
                 position=2,
             )
-            for val_batch_idx, (coords, features, labels) in enumerate(val_pbar):
-                coords = coords.to(self.device, non_blocking=True)
-                features = features.to(self.device, non_blocking=True)
-                labels = labels.to(self.device, non_blocking=True)
-                coords, feats, batch_ids, labels = self.batch_prep_fn(coords, features, labels)
-                bs_kwargs = (
-                    {'batch_size': labels.shape[0]} if self._model_accepts_batch_size else {}
-                )
+            for val_batch_idx, batch in enumerate(val_pbar):
+                coords, feats, batch_ids, labels = self._prepare_device_batch(*batch)
 
-                with self._get_autocast_context():
-                    if profile:
-                        t0 = time.time()
-                    preds = self.model(coords, feats, batch_ids=batch_ids, **bs_kwargs)
-                    if profile:
-                        if self.device.type == 'cuda':
-                            torch.cuda.synchronize()
-                        forward_times.append(time.time() - t0)
+                if profile:
+                    t0 = time.time()
+                preds, loss = self._forward_batch(coords, feats, batch_ids, labels)
+                if profile:
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize()
+                    forward_times.append(time.time() - t0)
 
-                    loss = self.loss_fn(preds, labels)
                 # Accumulate on-device and weight by batch size: .item() every
                 # batch would sync per batch, and an unweighted mean of batch
                 # means over-weights the last partial batch.
                 bsz = labels.shape[0]
                 total_loss = total_loss + loss.detach().float() * bsz
                 total_events += bsz
-                # fp32 accumulation: the best-checkpoint metric is computed from
-                # these, and bf16 autocast outputs would quantize it (~0.4%).
-                all_preds.append(preds.float().cpu())
-                all_labels.append(labels.float().cpu())
+                if collect_outputs:
+                    # fp32 accumulation: the best-checkpoint metric is computed
+                    # from these, and bf16 autocast outputs would quantize it (~0.4%).
+                    all_preds.append(preds.float().cpu())
+                    all_labels.append(labels.float().cpu())
                 if val_batch_idx % 20 == 0:
                     val_pbar.set_postfix({'Val Loss': f'{loss.item():.6f}'})
 
         if profile:
             self._print_profiling_results(forward_times, time.time() - start_time)
 
-        batch_count = len(all_preds)
-        avg_val_loss = float(total_loss) / max(1, total_events)
+        metrics = {'val_loss': float(total_loss) / max(1, total_events)}
 
-        metrics = {'val_loss': avg_val_loss}
-
-        if batch_count == 0:
+        if total_events == 0:
             if save_predictions:
                 print('Warning: No validation batches processed; skipping prediction export.')
             return metrics
 
-        preds_tensor = torch.cat(all_preds, dim=0)
-        labels_tensor = torch.cat(all_labels, dim=0)
+        if collect_outputs:
+            preds_tensor = torch.cat(all_preds, dim=0)
+            labels_tensor = torch.cat(all_labels, dim=0)
 
-        if save_predictions:
-            predictions_file = self.save_dir / 'results.npz'
-            np.savez(predictions_file, predictions=preds_tensor.float().numpy(), labels=labels_tensor.float().numpy())
-            print(f"Saved predictions to: {predictions_file}")
+            if save_predictions:
+                predictions_file = self.save_dir / 'results.npz'
+                np.savez(predictions_file, predictions=preds_tensor.numpy(), labels=labels_tensor.numpy())
+                print(f"Saved predictions to: {predictions_file}")
 
-        if self.metric_fn is not None:
-            task_metrics = self.metric_fn(preds_tensor, labels_tensor)
-            metrics.update({f'val_{k}': v for k, v in task_metrics.items()})
+            if self.metric_fn is not None:
+                task_metrics = self.metric_fn(preds_tensor, labels_tensor)
+                metrics.update({f'val_{k}': v for k, v in task_metrics.items()})
 
         return metrics
 

@@ -89,14 +89,9 @@ class IrregularDataCollator:
             batch_features.append(features)
             batch_labels.append(labels)
 
-        # Concatenate points, stack labels
-        if not batch_coords:
-            coords_b = torch.empty((0, 5), dtype=torch.float32)
-            features_b = torch.empty((0, 0), dtype=torch.float32)
-            labels_b = torch.empty((0,), dtype=torch.float32)
-        else:
-            coords_b = torch.cat(batch_coords, dim=0)
-            features_b = torch.cat(batch_features, dim=0)
-            labels_b = torch.stack(batch_labels, dim=0)
+        # Concatenate points, stack labels (DataLoader never yields an empty batch)
+        coords_b = torch.cat(batch_coords, dim=0)
+        features_b = torch.cat(batch_features, dim=0)
+        labels_b = torch.stack(batch_labels, dim=0)
 
         return coords_b, features_b, labels_b

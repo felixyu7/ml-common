@@ -1,7 +1,6 @@
 """Unified dataloader factory for creating train/val dataloaders."""
 
 import numpy as np
-import torch
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from typing import Dict, Any, Tuple
 
@@ -14,6 +13,27 @@ from ..utils.samplers import (
     RandomChunkSampler, LargeWeightedRandomSampler, ProportionalInterleaveSampler,
 )
 from ..utils.energy_weights import compute_energy_weights, extract_energies
+
+
+def _make_mmap_dataset(paths, split, data_options, task):
+    """Single construction point for MmapDataset.
+
+    Every route must go through here: hand-rolled per-branch constructor calls
+    previously dropped ``physics_labels`` on the separate-path and binary
+    routes, silently changing label width/smoothing with the path style.
+    """
+    return MmapDataset(
+        mmap_paths=paths,
+        use_summary_stats=data_options.get('use_summary_stats', True),
+        split=split,
+        val_split=data_options.get('val_split', 0.2),
+        split_seed=data_options.get('split_seed', 42),
+        task=task,
+        extended_stats=data_options.get('extended_stats', False),
+        summary_stats_mode=data_options.get('summary_stats_mode'),
+        morphology_filter=data_options.get('morphology_filter'),
+        physics_labels=data_options.get('physics_labels'),
+    )
 
 
 def _make_train_sampler(dataset, data_options):
@@ -92,7 +112,6 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     # nt-summary-stats mode: 'minimal'/'standard'/'extended'. Takes precedence
     # over the extended_stats bool; None falls back to it in the datasets.
     summary_stats_mode = data_options.get('summary_stats_mode')
-    morphology_filter = data_options.get('morphology_filter')
 
     if dataloader_type == 'i3':
         if not ICECUBE_AVAILABLE:
@@ -199,15 +218,11 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
         # Binary classification with two dataset groups
         from .mmap import BinaryLabelDataset
 
-        val_split = data_options.get('val_split', 0.2)
-        split_seed = data_options.get('split_seed', 42)
-        use_summary_stats = data_options.get('use_summary_stats', True)
-
         # Create stratified train/val datasets for each class
-        train_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
-        train_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "train", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
-        val_ds_0 = MmapDataset(data_options['data_path_0'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
-        val_ds_1 = MmapDataset(data_options['data_path_1'], use_summary_stats, "val", val_split, split_seed, task, extended_stats=extended_stats, morphology_filter=morphology_filter, summary_stats_mode=summary_stats_mode)
+        train_ds_0 = _make_mmap_dataset(data_options['data_path_0'], "train", data_options, task)
+        train_ds_1 = _make_mmap_dataset(data_options['data_path_1'], "train", data_options, task)
+        val_ds_0 = _make_mmap_dataset(data_options['data_path_0'], "val", data_options, task)
+        val_ds_1 = _make_mmap_dataset(data_options['data_path_1'], "val", data_options, task)
 
         train_dataset = BinaryLabelDataset(train_ds_0, train_ds_1)
         valid_dataset = BinaryLabelDataset(val_ds_0, val_ds_1)
@@ -222,37 +237,11 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     else:
         # Single path with runtime splitting
         if 'data_path' in data_options:
-            val_split = data_options.get('val_split', 0.2)
-            split_seed = data_options.get('split_seed', 42)
-
             if dataloader_type == 'kaggle':
                 raise ValueError("Runtime splitting not supported for Kaggle datasets. Use separate paths.")
 
-            train_dataset = MmapDataset(
-                mmap_paths=data_options['data_path'],
-                use_summary_stats=data_options.get('use_summary_stats', True),
-                split="train",
-                val_split=val_split,
-                split_seed=split_seed,
-                task=task,
-                extended_stats=extended_stats,
-                summary_stats_mode=summary_stats_mode,
-                morphology_filter=morphology_filter,
-                physics_labels=data_options.get('physics_labels'),
-            )
-
-            valid_dataset = MmapDataset(
-                mmap_paths=data_options['data_path'],
-                use_summary_stats=data_options.get('use_summary_stats', True),
-                split="val",
-                val_split=val_split,
-                split_seed=split_seed,
-                task=task,
-                extended_stats=extended_stats,
-                summary_stats_mode=summary_stats_mode,
-                morphology_filter=morphology_filter,
-                physics_labels=data_options.get('physics_labels'),
-            )
+            train_dataset = _make_mmap_dataset(data_options['data_path'], "train", data_options, task)
+            valid_dataset = _make_mmap_dataset(data_options['data_path'], "val", data_options, task)
 
         else:
             # Separate train/valid paths
@@ -285,23 +274,8 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 )
             else:
                 # Unified mmap format
-                train_dataset = MmapDataset(
-                    mmap_paths=data_options['train_data_path'],
-                    use_summary_stats=data_options.get('use_summary_stats', True),
-                    task=task,
-                    extended_stats=extended_stats,
-                    summary_stats_mode=summary_stats_mode,
-                    morphology_filter=morphology_filter,
-                )
-
-                valid_dataset = MmapDataset(
-                    mmap_paths=data_options['valid_data_path'],
-                    use_summary_stats=data_options.get('use_summary_stats', True),
-                    task=task,
-                    extended_stats=extended_stats,
-                    summary_stats_mode=summary_stats_mode,
-                    morphology_filter=morphology_filter,
-                )
+                train_dataset = _make_mmap_dataset(data_options['train_data_path'], "full", data_options, task)
+                valid_dataset = _make_mmap_dataset(data_options['valid_data_path'], "full", data_options, task)
 
         train_len = len(train_dataset)
         if train_len == 0:

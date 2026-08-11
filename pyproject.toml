@@ -20,6 +20,10 @@ dependencies = [
     "pyarrow>=12.0",
 ]
 
+[project.optional-dependencies]
+# ExtrudedPolygon physics labels (ml_common.utils.detector_geometry)
+physics = ["scipy>=1.9"]
+
 [tool.setuptools]
 packages = { find = { where = ["."] } }
 

@@ -74,7 +74,6 @@ class KaggleDataset(torch.utils.data.Dataset):
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
         self.meta_dir = meta_dir
-        self.batch_files = batch_files
         self.batch_file_names = [Path(f).name for f in batch_files]
         self.sensor_geometry = sensor_geometry
         self.cache_size = cache_size
