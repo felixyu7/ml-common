@@ -22,6 +22,7 @@ except ImportError:
 from .mmap import (
     _charge_weighted_median,
     _normalize_summary_stats,
+    _pulse_features,
     _resolve_summary_stats_mode,
     SUMMARY_STATS_FIRST_HIT_TIME_COL,
     VERTEX_CENTER_M,
@@ -228,18 +229,12 @@ class ParquetDataset(torch.utils.data.Dataset):
 
             feats = _normalize_summary_stats(sensor_stats, self.summary_stats_mode)
         else:
-            # Pulse-level (no aggregation)
-            # Features: [placeholder, log(charge+1), string_id, sensor_id] to match MmapDataset format
+            # Pulse-level (no aggregation): same layout as MmapDataset,
+            # [log1p q, signed-log t]; each photon carries unit charge.
             pos = np.column_stack([hit_x, hit_y, hit_z, hit_t]).astype(np.float32) / 1000.
-            string_ids = np.array(photons['string_id'], dtype=np.float32)
-            sensor_ids = np.array(photons['sensor_id'], dtype=np.float32)
-            log_charge = np.log(2.0) * np.ones(len(hit_t), dtype=np.float32)  # 1 photon = log(1+1)
-            feats = np.column_stack([
-                np.zeros(len(hit_t), dtype=np.float32),  # placeholder (column 0)
-                log_charge,   # log(charge+1) (column 1)
-                string_ids,   # string_id (column 2)
-                sensor_ids,   # sensor_id (column 3)
-            ])
+            dom_key = (np.asarray(photons['string_id'], dtype=np.int64) * 1000
+                       + np.asarray(photons['sensor_id'], dtype=np.int64))
+            feats = _pulse_features(hit_t, np.ones(len(hit_t), dtype=np.float32), dom_key)
 
         # === Extract Event Labels ===
         zenith = mc['initial_state_zenith']

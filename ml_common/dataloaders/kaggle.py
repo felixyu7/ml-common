@@ -206,7 +206,6 @@ class KaggleDataset(torch.utils.data.Dataset):
         else:
             sensor_positions = self.sensor_geometry[sensor_ids]
             times_norm = (times - 1e4) / 3e4
-            charges_norm = np.log10(charges) / 3.0
 
             pos = np.column_stack([
                 sensor_positions[:, 0] / 1000.0,
@@ -215,7 +214,8 @@ class KaggleDataset(torch.utils.data.Dataset):
                 times / 1000.0,
             ]).astype(np.float32)
 
-            feats = np.column_stack([times_norm, charges_norm]).astype(np.float32)
+            # Charge first (log1p): the tokenizer's charge_col=0 weights pooling by it.
+            feats = np.column_stack([np.log1p(charges), times_norm]).astype(np.float32)
 
         # Sort by time
         if pos.shape[0] > 0:

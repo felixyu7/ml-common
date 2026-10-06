@@ -33,6 +33,8 @@ def _make_mmap_dataset(paths, split, data_options, task):
         summary_stats_mode=data_options.get('summary_stats_mode'),
         morphology_filter=data_options.get('morphology_filter'),
         physics_labels=data_options.get('physics_labels'),
+        dataset_fraction=data_options.get('dataset_fraction'),
+        pulse_slots=data_options.get('pulse_slots', 0),
     )
 
 

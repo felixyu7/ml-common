@@ -72,12 +72,31 @@ class IrregularDataCollator:
             # DOM dropout: independent per-DOM Bernoulli during training,
             # always keeping at least one DOM. NOT fixed-count subsampling —
             # int(n*(1-p)) over-drops sparse events (a 2-DOM event loses 50%
-            # at any p > 0) and never leaves an event intact.
+            # at any p > 0) and never leaves an event intact. Points are grouped
+            # into DOMs by position, so in pulse mode a dropped DOM takes all of
+            # its pulses with it (per-pulse dropout would be a different,
+            # much weaker augmentation).
             if self.dom_dropout > 0 and self.training:
                 n = coords.shape[0]
-                keep_mask = torch.rand(n) >= self.dom_dropout
-                if n > 0 and not keep_mask.any():
-                    keep_mask[torch.randint(n, (1,)).item()] = True
+                if n > 0:
+                    # 1-D key from positions quantized to 1e-5 (1 cm in km; DOMs are
+                    # >= 7 m apart): unique on int64 is ~40x faster than on rows.
+                    qc = torch.round(coords[:, :3].double() * 1e5).long() + (1 << 20)
+                    key = (qc[:, 0] << 42) | (qc[:, 1] << 21) | qc[:, 2]
+                    dom_ids = torch.unique(key, return_inverse=True)[1]
+                    n_dom = int(dom_ids.max()) + 1
+                else:
+                    n_dom = 0
+                if n_dom == n:
+                    # One point per DOM (summary stats): same draw as before.
+                    keep_mask = torch.rand(n) >= self.dom_dropout
+                    if n > 0 and not keep_mask.any():
+                        keep_mask[torch.randint(n, (1,)).item()] = True
+                else:
+                    keep_dom = torch.rand(n_dom) >= self.dom_dropout
+                    if not keep_dom.any():
+                        keep_dom[torch.randint(n_dom, (1,)).item()] = True
+                    keep_mask = keep_dom[dom_ids]
                 coords = coords[keep_mask]
                 features = features[keep_mask]
 

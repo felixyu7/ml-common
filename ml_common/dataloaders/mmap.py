@@ -75,6 +75,80 @@ def _charge_weighted_median(times: np.ndarray, charges: np.ndarray) -> float:
     return float(ts[np.searchsorted(cw, 0.5 * total)])
 
 
+# Pulse-level feature layout: [log1p(charge), signed-log(time), log1p(ns since
+# the DOM's first pulse)]. Charge must be column 0 — the tokenizer's
+# ``charge_col`` (default 0) drives Lloyd centroid weights, charge-weighted
+# pooling, per-token charge scalars and the event total-charge scalar, all of
+# which assume a non-negative log1p charge there. Column 2 feeds the
+# tokenizer's ``anchor_dt_col`` (DOM first-hit anchoring).
+PULSE_N_FEATURES = 3
+
+
+def _dom_first_times(times_ns: np.ndarray, dom_key: np.ndarray):
+    """(inverse DOM index per pulse, first-pulse time per DOM)."""
+    order = np.argsort(dom_key, kind="stable")
+    ks = dom_key[order]
+    new_dom = np.empty(ks.size, dtype=bool)
+    new_dom[:1] = True
+    np.not_equal(ks[1:], ks[:-1], out=new_dom[1:])
+    inv = np.empty(ks.size, dtype=np.int64)
+    inv[order] = np.cumsum(new_dom) - 1
+    first = (np.minimum.reduceat(np.asarray(times_ns, dtype=np.float32)[order], np.flatnonzero(new_dom))
+             if ks.size else np.zeros(0, dtype=np.float32))
+    return inv, first
+
+
+def _pulse_features(times_ns: np.ndarray, charges: np.ndarray,
+                    dom_key: np.ndarray) -> np.ndarray:
+    """Per-pulse features, cols 0-1 normalized like 'minimal' summary stats.
+
+    ``times_ns`` should already be relative to the per-event reference (see
+    _charge_weighted_median); the sign-preserving log keeps early pulses
+    negative. ``dom_key`` is any per-pulse integer DOM identifier.
+    """
+    t = np.asarray(times_ns, dtype=np.float32)
+    q = np.asarray(charges, dtype=np.float32)
+    inv, first = _dom_first_times(t, np.asarray(dom_key))
+    return np.column_stack([
+        np.log1p(np.maximum(q, 0.0)),
+        np.sign(t) * np.log1p(np.abs(t)),
+        np.log1p(t - first[inv]),
+    ]).astype(np.float32)
+
+
+def _dom_pulse_slots(xyz: np.ndarray, times_ns: np.ndarray, charges: np.ndarray,
+                     dom_key: np.ndarray, n_slots: int):
+    """One point per DOM carrying its first ``n_slots`` pulses.
+
+    Returns pos [D, 4] = (x, y, z, first-pulse time) in the input units and
+    feats [D, 3 + 2 * n_slots] = [log1p Q_dom, slog t_first, log1p n_pulses,
+    (log1p q, log1p dt since first pulse) per time-ordered slot, zero-padded].
+    Matches the tokenizer's PulseSlotEncoder layout (charge_col = 0).
+    """
+    t = np.asarray(times_ns, dtype=np.float32)
+    q = np.asarray(charges, dtype=np.float32)
+    inv, first = _dom_first_times(t, np.asarray(dom_key))
+    n_dom = first.size
+    order = np.lexsort((t, inv))                     # by DOM, then time
+    inv_o = inv[order]
+    counts = np.bincount(inv, minlength=n_dom)
+    rank = np.arange(order.size) - np.repeat(np.cumsum(counts) - counts, counts)
+    keep = rank < n_slots
+    slots = np.zeros((n_dom, n_slots, 2), dtype=np.float32)
+    o = order[keep]
+    slots[inv_o[keep], rank[keep], 0] = np.log1p(np.maximum(q[o], 0.0))
+    slots[inv_o[keep], rank[keep], 1] = np.log1p(t[o] - first[inv_o[keep]])
+    q_dom = np.bincount(inv, weights=q, minlength=n_dom)
+    pos = np.zeros((n_dom, 4), dtype=np.float32)
+    pos[inv] = np.column_stack([xyz, t])             # xyz shared per DOM
+    pos[:, 3] = first
+    feats = np.column_stack([
+        np.log1p(q_dom), np.sign(first) * np.log1p(np.abs(first)), np.log1p(counts),
+        slots.reshape(n_dom, -1),
+    ]).astype(np.float32)
+    return pos, feats
+
+
 def _normalize_summary_stats(sensor_stats: np.ndarray, mode: str) -> np.ndarray:
     """Per-feature normalization for summary statistics.
 
@@ -136,6 +210,8 @@ class MmapDataset(torch.utils.data.Dataset):
         morphology_filter: Optional[Union[List[int], Dict[int, float]]] = None,
         summary_stats_mode: Optional[str] = None,
         physics_labels: Optional[Dict] = None,
+        dataset_fraction: Optional[Union[float, List[float]]] = None,
+        pulse_slots: int = 0,
     ):
         """
         Initialize MmapDataset.
@@ -160,7 +236,15 @@ class MmapDataset(torch.utils.data.Dataset):
             summary_stats_mode: nt-summary-stats mode, one of 'minimal' (4),
                 'standard' (9), or 'extended' (25). When None (default), falls
                 back to the ``extended_stats`` bool.
+            dataset_fraction: Optional uniform subsample applied per mmap file
+                before any other filtering. A float applies to every file; a
+                list gives one fraction per entry of ``mmap_paths``.
+                Deterministic in ``split_seed``.
+            pulse_slots: With ``use_summary_stats=False``, > 0 emits one point
+                per DOM carrying its first ``pulse_slots`` pulses (see
+                _dom_pulse_slots) instead of one point per pulse.
         """
+        self.pulse_slots = int(pulse_slots)
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
@@ -205,8 +289,26 @@ class MmapDataset(torch.utils.data.Dataset):
         if self.task not in {'event_reconstruction', 'starting_classification'}:
             raise ValueError(f"Unsupported task '{task}'. Expected 'event_reconstruction' or 'starting_classification'.")
 
+        # Optional per-file uniform subsample (applied before morphology filter)
+        subset_pool = None
+        if dataset_fraction is not None:
+            n_files = len(self.datasets)
+            fracs = ([float(dataset_fraction)] * n_files
+                     if np.isscalar(dataset_fraction) else [float(f) for f in dataset_fraction])
+            if len(fracs) != n_files:
+                raise ValueError(f"dataset_fraction has {len(fracs)} entries for {n_files} mmap files")
+            sub_rng = np.random.RandomState(split_seed)
+            starts = np.concatenate([[0], self.cumulative_lengths[:-1]])
+            pools = []
+            for start, stop, frac in zip(starts, self.cumulative_lengths, fracs):
+                n_file = int(stop - start)
+                n_keep = n_file if frac >= 1.0 else int(round(n_file * frac))
+                pools.append(start + np.sort(sub_rng.choice(n_file, size=n_keep, replace=False)))
+            subset_pool = np.concatenate(pools).astype(np.int64)
+            print(f"Dataset fraction {fracs}: kept {len(subset_pool):,} / {self.total_events:,} events")
+
         # Optional morphology pre-filter (IceCube only)
-        valid_pool = None
+        valid_pool = subset_pool
         if morphology_filter is not None:
             if self.dataset_type != 'icecube':
                 raise ValueError("morphology_filter is only supported for IceCube datasets")
@@ -228,6 +330,8 @@ class MmapDataset(torch.utils.data.Dataset):
                 pools.append(idx)
                 print(f"  morph {cls}: kept {len(idx):,} (frac={frac})")
             valid_pool = np.sort(np.concatenate(pools)) if pools else np.array([], dtype=np.int64)
+            if subset_pool is not None:
+                valid_pool = np.intersect1d(valid_pool, subset_pool, assume_unique=True)
             print(f"Morphology filter: kept {len(valid_pool):,} / {self.total_events:,} events")
 
         # Handle train/val splitting (over the filtered pool, if any)
@@ -328,13 +432,19 @@ class MmapDataset(torch.utils.data.Dataset):
 
             feats = _normalize_summary_stats(sensor_stats, self.summary_stats_mode)
         else:
-            # Pulse-level: use time, charge, and DOM identifiers as features
-            pos = np.column_stack([photons['x'], photons['y'], photons['z'], photons['t']]) / 1000.
-            charge_feat = np.log(photons['charge'] + 1).reshape(-1, 1).astype(np.float32)
-            time_feat = pos[:, 3:4].astype(np.float32)
-            string_id = photons['string_id'].reshape(-1, 1).astype(np.float32)
-            sensor_id = photons['sensor_id'].reshape(-1, 1).astype(np.float32)
-            feats = np.concatenate([time_feat, charge_feat, string_id, sensor_id], axis=1)
+            dom_key = photons['string_id'].astype(np.int64) * 1000 + photons['sensor_id']
+            if self.pulse_slots > 0:
+                # One point per DOM with its first pulse_slots pulses as features
+                pos, feats = _dom_pulse_slots(
+                    np.column_stack([photons['x'], photons['y'], photons['z']]),
+                    photons['t'], photons['charge'], dom_key, self.pulse_slots)
+                pos = pos / 1000.
+            else:
+                # Pulse-level: one point per pulse
+                pos = np.column_stack([
+                    photons['x'], photons['y'], photons['z'], photons['t'],
+                ]).astype(np.float32) / 1000.
+                feats = _pulse_features(photons['t'], photons['charge'], dom_key)
 
         # Extract labels
         initial_zenith = event_record['initial_zenith']

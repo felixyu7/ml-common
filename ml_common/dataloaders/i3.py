@@ -9,6 +9,8 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
+from .mmap import _charge_weighted_median, _pulse_features
+
 try:
     from icecube import dataio, dataclasses, icetray  # type: ignore
     ICECUBE_AVAILABLE = True
@@ -148,12 +150,14 @@ class I3IterableDataset(IterableDataset):
                 positions: List[np.ndarray] = []
                 times: List[float] = []
                 charges: List[float] = []
-                for omkey, series in pulse_map.items():
+                doms: List[int] = []
+                for d, (omkey, series) in enumerate(pulse_map.items()):
                     dom_position = self.om_positions[omkey]
                     for pulse in series:
                         positions.append(dom_position)
                         times.append(pulse.time)
                         charges.append(pulse.charge)
+                        doms.append(d)
                 if not positions:
                     continue
 
@@ -161,11 +165,12 @@ class I3IterableDataset(IterableDataset):
                 t = np.asarray(times, dtype=np.float32)
                 q = np.asarray(charges, dtype=np.float32)
 
+                # Reference times to the charge-weighted median (matches MmapDataset)
+                t = t - np.float32(_charge_weighted_median(t, q))
                 coords = np.concatenate([pos, t[:, None]], axis=1)  # (N,4)
-                features = np.stack([t, np.log1p(q)], axis=1)        # (N,2)
+                features = _pulse_features(t, q, np.asarray(doms))  # (N,3)
 
                 coords *= 1e-3            # meters/ns -> km/µs
-                features[:, 0] *= 1e-3    # ns -> µs
 
                 primary = frame[self.primary_key]
                 energy = primary.energy
