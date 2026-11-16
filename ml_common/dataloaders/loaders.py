@@ -29,12 +29,10 @@ def _make_mmap_dataset(paths, split, data_options, task):
         val_split=data_options.get('val_split', 0.2),
         split_seed=data_options.get('split_seed', 42),
         task=task,
-        extended_stats=data_options.get('extended_stats', False),
         summary_stats_mode=data_options.get('summary_stats_mode'),
         morphology_filter=data_options.get('morphology_filter'),
         physics_labels=data_options.get('physics_labels'),
         dataset_fraction=data_options.get('dataset_fraction'),
-        pulse_slots=data_options.get('pulse_slots', 0),
     )
 
 
@@ -100,8 +98,7 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
 
             # Common options
             use_summary_stats: true
-            summary_stats_mode: extended  # 'minimal'(4)/'standard'(9)/'extended'(25);
-                                          # falls back to extended_stats bool if unset
+            summary_stats_mode: extended  # 'minimal'(4)/'standard'(9, default)/'extended'(25)
             batch_size: 256  # or in training_options
             num_workers: 8   # or in training_options
 
@@ -110,9 +107,13 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     data_options = cfg['data_options']
     dataloader_type = cfg['dataloader']
     task = cfg.get('task') or data_options.get('task')
-    extended_stats = data_options.get('extended_stats', False)
-    # nt-summary-stats mode: 'minimal'/'standard'/'extended'. Takes precedence
-    # over the extended_stats bool; None falls back to it in the datasets.
+    # Options removed in favour of summary_stats_mode / plain pulses: fail
+    # loudly instead of silently training on different inputs.
+    if 'extended_stats' in data_options or data_options.get('pulse_slots'):
+        raise ValueError(
+            "data_options 'extended_stats' and 'pulse_slots' were removed; "
+            "use summary_stats_mode: 'minimal' | 'standard' | 'extended'.")
+    # nt-summary-stats mode: 'minimal'/'standard'/'extended' (None -> 'standard').
     summary_stats_mode = data_options.get('summary_stats_mode')
 
     if dataloader_type == 'i3':
@@ -172,7 +173,6 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 max_stochastic=max_stochastic,
                 min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
-                extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
             )
 
@@ -186,7 +186,6 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 max_stochastic=max_stochastic,
                 min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
-                extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
             )
         else:
@@ -198,7 +197,6 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 max_stochastic=max_stochastic,
                 min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
-                extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
             )
 
@@ -209,7 +207,6 @@ def create_dataloaders(cfg: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
                 max_stochastic=max_stochastic,
                 min_stochastic_energy=min_stochastic_energy,
                 cache_size=cache_size,
-                extended_stats=extended_stats,
                 summary_stats_mode=summary_stats_mode,
             )
 

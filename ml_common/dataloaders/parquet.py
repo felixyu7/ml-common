@@ -64,7 +64,6 @@ class ParquetDataset(torch.utils.data.Dataset):
         max_stochastic: int = 100,
         min_stochastic_energy: float = 0.5,
         cache_size: int = 20,
-        extended_stats: bool = False,
         summary_stats_mode: Optional[str] = None,
     ):
         """
@@ -81,8 +80,7 @@ class ParquetDataset(torch.utils.data.Dataset):
             min_stochastic_energy: Minimum stochastic loss energy threshold in GeV
             cache_size: Number of parquet files to keep in LRU cache
             summary_stats_mode: nt-summary-stats mode, one of 'minimal' (4),
-                'standard' (9), or 'extended' (25). When None (default), falls
-                back to the ``extended_stats`` bool.
+                'standard' (9, the default), or 'extended' (25).
         """
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError(
@@ -90,7 +88,7 @@ class ParquetDataset(torch.utils.data.Dataset):
                 "Please do 'pip install nt-summary-stats'."
             )
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
-        self.summary_stats_mode = _resolve_summary_stats_mode(summary_stats_mode, extended_stats)
+        self.summary_stats_mode = _resolve_summary_stats_mode(summary_stats_mode)
         self.max_stochastic = max_stochastic
         self.min_stochastic_energy = min_stochastic_energy
         self.cache_size = cache_size

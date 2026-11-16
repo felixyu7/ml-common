@@ -25,17 +25,11 @@ SUMMARY_STATS_N_FEATURES = {"minimal": 4, "standard": 9, "extended": 25}
 SUMMARY_STATS_FIRST_HIT_TIME_COL = {"minimal": 1, "standard": 3, "extended": 3}
 
 
-def _resolve_summary_stats_mode(
-    summary_stats_mode: Optional[str] = None, extended_stats: bool = False
-) -> str:
-    """Resolve the nt-summary-stats mode string.
-
-    ``summary_stats_mode`` (one of 'minimal'/'standard'/'extended') takes
-    precedence; when None, fall back to the ``extended_stats`` bool
-    (True -> 'extended', False -> 'standard').
-    """
+def _resolve_summary_stats_mode(summary_stats_mode: Optional[str] = None) -> str:
+    """Validate the nt-summary-stats mode ('minimal'/'standard'/'extended');
+    None means 'standard'."""
     if summary_stats_mode is None:
-        summary_stats_mode = "extended" if extended_stats else "standard"
+        summary_stats_mode = "standard"
     if summary_stats_mode not in SUMMARY_STATS_N_FEATURES:
         valid = ", ".join(repr(m) for m in SUMMARY_STATS_N_FEATURES)
         raise ValueError(
@@ -116,39 +110,6 @@ def _pulse_features(times_ns: np.ndarray, charges: np.ndarray,
     ]).astype(np.float32)
 
 
-def _dom_pulse_slots(xyz: np.ndarray, times_ns: np.ndarray, charges: np.ndarray,
-                     dom_key: np.ndarray, n_slots: int):
-    """One point per DOM carrying its first ``n_slots`` pulses.
-
-    Returns pos [D, 4] = (x, y, z, first-pulse time) in the input units and
-    feats [D, 3 + 2 * n_slots] = [log1p Q_dom, slog t_first, log1p n_pulses,
-    (log1p q, log1p dt since first pulse) per time-ordered slot, zero-padded].
-    Matches the tokenizer's PulseSlotEncoder layout (charge_col = 0).
-    """
-    t = np.asarray(times_ns, dtype=np.float32)
-    q = np.asarray(charges, dtype=np.float32)
-    inv, first = _dom_first_times(t, np.asarray(dom_key))
-    n_dom = first.size
-    order = np.lexsort((t, inv))                     # by DOM, then time
-    inv_o = inv[order]
-    counts = np.bincount(inv, minlength=n_dom)
-    rank = np.arange(order.size) - np.repeat(np.cumsum(counts) - counts, counts)
-    keep = rank < n_slots
-    slots = np.zeros((n_dom, n_slots, 2), dtype=np.float32)
-    o = order[keep]
-    slots[inv_o[keep], rank[keep], 0] = np.log1p(np.maximum(q[o], 0.0))
-    slots[inv_o[keep], rank[keep], 1] = np.log1p(t[o] - first[inv_o[keep]])
-    q_dom = np.bincount(inv, weights=q, minlength=n_dom)
-    pos = np.zeros((n_dom, 4), dtype=np.float32)
-    pos[inv] = np.column_stack([xyz, t])             # xyz shared per DOM
-    pos[:, 3] = first
-    feats = np.column_stack([
-        np.log1p(q_dom), np.sign(first) * np.log1p(np.abs(first)), np.log1p(counts),
-        slots.reshape(n_dom, -1),
-    ]).astype(np.float32)
-    return pos, feats
-
-
 def _normalize_summary_stats(sensor_stats: np.ndarray, mode: str) -> np.ndarray:
     """Per-feature normalization for summary statistics.
 
@@ -206,12 +167,10 @@ class MmapDataset(torch.utils.data.Dataset):
         val_split: float = 0.2,
         split_seed: int = 42,
         task: Optional[str] = None,
-        extended_stats: bool = False,
         morphology_filter: Optional[Union[List[int], Dict[int, float]]] = None,
         summary_stats_mode: Optional[str] = None,
         physics_labels: Optional[Dict] = None,
         dataset_fraction: Optional[Union[float, List[float]]] = None,
-        pulse_slots: int = 0,
     ):
         """
         Initialize MmapDataset.
@@ -234,21 +193,16 @@ class MmapDataset(torch.utils.data.Dataset):
                 2=throughgoing track, 3=stopping track, 4=uncontained, 5=bundle.
                 IceCube-only.
             summary_stats_mode: nt-summary-stats mode, one of 'minimal' (4),
-                'standard' (9), or 'extended' (25). When None (default), falls
-                back to the ``extended_stats`` bool.
+                'standard' (9, the default), or 'extended' (25).
             dataset_fraction: Optional uniform subsample applied per mmap file
                 before any other filtering. A float applies to every file; a
                 list gives one fraction per entry of ``mmap_paths``.
                 Deterministic in ``split_seed``.
-            pulse_slots: With ``use_summary_stats=False``, > 0 emits one point
-                per DOM carrying its first ``pulse_slots`` pulses (see
-                _dom_pulse_slots) instead of one point per pulse.
         """
-        self.pulse_slots = int(pulse_slots)
         if use_summary_stats and not HAS_SUMMARY_STATS:
             raise ImportError("nt_summary_stats package is required for summary stats processing. Please do 'pip install nt-summary-stats'.")
         self.use_summary_stats = use_summary_stats and HAS_SUMMARY_STATS
-        self.summary_stats_mode = _resolve_summary_stats_mode(summary_stats_mode, extended_stats)
+        self.summary_stats_mode = _resolve_summary_stats_mode(summary_stats_mode)
 
         if isinstance(mmap_paths, str):
             mmap_paths = [mmap_paths]
@@ -433,18 +387,11 @@ class MmapDataset(torch.utils.data.Dataset):
             feats = _normalize_summary_stats(sensor_stats, self.summary_stats_mode)
         else:
             dom_key = photons['string_id'].astype(np.int64) * 1000 + photons['sensor_id']
-            if self.pulse_slots > 0:
-                # One point per DOM with its first pulse_slots pulses as features
-                pos, feats = _dom_pulse_slots(
-                    np.column_stack([photons['x'], photons['y'], photons['z']]),
-                    photons['t'], photons['charge'], dom_key, self.pulse_slots)
-                pos = pos / 1000.
-            else:
-                # Pulse-level: one point per pulse
-                pos = np.column_stack([
-                    photons['x'], photons['y'], photons['z'], photons['t'],
-                ]).astype(np.float32) / 1000.
-                feats = _pulse_features(photons['t'], photons['charge'], dom_key)
+            # Pulse-level: one point per pulse
+            pos = np.column_stack([
+                photons['x'], photons['y'], photons['z'], photons['t'],
+            ]).astype(np.float32) / 1000.
+            feats = _pulse_features(photons['t'], photons['charge'], dom_key)
 
         # Extract labels
         initial_zenith = event_record['initial_zenith']
